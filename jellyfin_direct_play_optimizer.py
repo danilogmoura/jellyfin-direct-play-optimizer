@@ -378,7 +378,7 @@ def is_allowed_subtitle_name(name: str, base_name: str) -> bool:
     return bool(language_tokens)
 
 
-def build_video_args(video: dict[str, Any], crf: int, source: Path) -> list[str]:
+def build_video_args(video: dict[str, Any], crf: int, source: Path, encoder: str = "libx264") -> list[str]:
     filter_prefix = ""
     if is_interlaced(video):
         print("  -> Video: Entrelaçado detectado; aplicando desentrelaçamento...")
@@ -402,23 +402,13 @@ def build_video_args(video: dict[str, Any], crf: int, source: Path) -> list[str]
             f"format=yuv420p{range_filter}"
         )
 
-    args = [
-        "-vf",
-        filter_value,
-        "-c:v",
-        "libx264",
-        "-preset",
-        "fast",
-        "-tune",
-        "animation" if is_animation(source) else "film",
+    common_tail = [
         "-profile:v",
         "high",
         "-level:v",
         "4.1",
         "-pix_fmt",
         "yuv420p",
-        "-crf",
-        str(crf),
         "-color_range",
         "1",
         "-colorspace",
@@ -430,6 +420,40 @@ def build_video_args(video: dict[str, Any], crf: int, source: Path) -> list[str]
         "-fps_mode",
         "cfr",
     ]
+
+    if encoder == "nvenc":
+        print("  -> Video: usando NVENC (GPU)...")
+        args = [
+            "-vf",
+            filter_value,
+            "-c:v",
+            "h264_nvenc",
+            "-preset",
+            "p5",
+            "-tune",
+            "hq",
+            "-rc",
+            "vbr",
+            "-cq",
+            str(crf),
+            "-b:v",
+            "0",
+            *common_tail,
+        ]
+    else:
+        args = [
+            "-vf",
+            filter_value,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "fast",
+            "-tune",
+            "animation" if is_animation(source) else "film",
+            "-crf",
+            str(crf),
+            *common_tail,
+        ]
     output_frame_rate = target_frame_rate(video)
     if is_variable_frame_rate(video):
         print(f"  -> Video: VFR detectado; normalizando para {output_frame_rate} fps...")
@@ -501,6 +525,41 @@ def build_audio_args(audio_streams: list[dict[str, Any]]) -> tuple[list[str], li
     return maps, codecs, metadata
 
 
+NVENC_ERROR_HINTS = (
+    (("cannot load nvcuda", "nvcuda.dll", "cannot load libcuda", "libcuda"), "driver/CUDA da NVIDIA nao disponivel"),
+    (
+        ("no nvenc capable devices", "no capable devices found", "openencodesessionex"),
+        "nenhum dispositivo NVENC disponivel",
+    ),
+    (("unknown encoder", "h264_nvenc"), "o ffmpeg atual nao inclui o encoder h264_nvenc"),
+    (
+        ("driver does not support", "minimum required nvidia driver"),
+        "driver NVIDIA antigo para esta versao do ffmpeg",
+    ),
+    (
+        ("error setting option preset", "error setting option tune", "error setting option rc", "error setting option cq"),
+        "opcoes do NVENC nao suportadas por esta versao do ffmpeg",
+    ),
+    (("error while opening encoder", "initialize encoder failed"), "falha ao inicializar o encoder NVENC"),
+)
+
+
+def detect_nvenc_error(video_log: Path) -> str | None:
+    if not video_log.exists():
+        return None
+    text = video_log.read_text(encoding="utf-8", errors="replace")
+    command_marker = text.rfind("Comando:")
+    if command_marker != -1:
+        command_end = text.find("\n", command_marker)
+        if command_end != -1:
+            text = text[command_end + 1:]
+    lowered = text.lower()
+    for patterns, hint in NVENC_ERROR_HINTS:
+        if any(pattern in lowered for pattern in patterns):
+            return hint
+    return None
+
+
 def process_file(
     source: Path,
     root: Path,
@@ -511,6 +570,7 @@ def process_file(
     analysis_results: list[tuple[Path, str]] | None = None,
     decision_counts: dict[str, int] | None = None,
     overwrite: bool = False,
+    encoder: str = "libx264",
 ) -> None:
     relative_parent = source.parent.relative_to(root)
     destination = root / "DirectPlay" / relative_parent
@@ -602,8 +662,8 @@ def process_file(
         codec_args = ["-c:v", "copy"] + audio_args
     else:
         audio_maps, audio_args, metadata_args = build_audio_args(audio)
-        codec_args = build_video_args(video, crf, source) + audio_args
-        write_log(video_log, "Modo: recodificacao")
+        codec_args = build_video_args(video, crf, source, encoder) + audio_args
+        write_log(video_log, "Modo: recodificacao" + (" (nvenc)" if encoder == "nvenc" else ""))
     command = [
         "ffmpeg",
         "-nostdin",
@@ -672,6 +732,15 @@ def process_file(
         temporary.unlink(missing_ok=True)
         print(f"Falha ao converter: {source}", file=sys.stderr)
         write_log(video_log, f"Falha na conversao: codigo {result_code}")
+        if encoder == "nvenc":
+            nvenc_error = detect_nvenc_error(video_log)
+            detail = f": {nvenc_error}" if nvenc_error else ""
+            print(f"  -> Falha no encoder NVENC{detail}.", file=sys.stderr)
+            print("  -> Nenhum fallback automatico para CPU sera feito.", file=sys.stderr)
+            print("  -> Para processar com CPU, rode novamente com: --encoder libx264", file=sys.stderr)
+            write_log(video_log, f"NVENC falhou{detail}; sem fallback automatico para CPU")
+            write_log(root_log, f"Falha no NVENC (sem fallback para CPU): {source}")
+            return
         write_log(root_log, f"Falha na conversao: {source}")
         return
 
@@ -706,6 +775,12 @@ def main() -> int:
     mode_group.add_argument("--analyze", action="store_true", help="Apenas analisa e mostra a decisao, sem converter")
     mode_group.add_argument("--full", action="store_true", help="Forca recodificacao completa do video")
     parser.add_argument("--overwrite", action="store_true", help="Reprocessa arquivos que ja possuem saida")
+    parser.add_argument(
+        "--encoder",
+        choices=["libx264", "nvenc"],
+        default="libx264",
+        help="Encoder de video: libx264 (CPU, padrao) ou nvenc (GPU)",
+    )
     args = parser.parse_args()
     if not 0 <= args.crf <= 51:
         parser.error("--crf deve estar entre 0 e 51")
@@ -726,7 +801,10 @@ def main() -> int:
         print("Modo hibrido ativado: remux, video copy ou recodificacao conforme a analise.")
     print("Iniciando processamento MP4 Direct Play (Python)...")
     print(f"Pasta Raiz de Busca: {root}")
-    print(f"Pasta Raiz de Destino: {output_root}\n")
+    print(f"Pasta Raiz de Destino: {output_root}")
+    if args.encoder == "nvenc":
+        print("Encoder de video: nvenc (GPU)")
+    print()
 
     analysis_results: list[tuple[Path, str]] = []
     decision_counts: dict[str, int] = {}
@@ -745,6 +823,7 @@ def main() -> int:
             analysis_results=analysis_results,
             decision_counts=decision_counts,
             overwrite=args.overwrite,
+            encoder=args.encoder,
         )
 
     if args.analyze:
