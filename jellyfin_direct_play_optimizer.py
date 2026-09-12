@@ -671,7 +671,7 @@ def process_file(
         "-i",
         str(source),
         "-map",
-        "0:v:0",
+        f"0:{video['index']}",
         *audio_maps,
         *codec_args,
         *metadata_args,
