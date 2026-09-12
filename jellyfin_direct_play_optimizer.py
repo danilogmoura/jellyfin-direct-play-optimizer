@@ -255,7 +255,7 @@ def is_video_copy_compatible(video: dict[str, Any]) -> bool:
     return (
         str(video.get("codec_name", "")).lower() == "h264"
         and profile in {"baseline", "main", "high"}
-        and level <= 40
+        and level <= 41
         and str(video.get("pix_fmt", "")).lower() == "yuv420p"
         and int(video.get("width", 0)) <= 1920
         and int(video.get("height", 0)) <= 1080
@@ -412,9 +412,9 @@ def build_video_args(video: dict[str, Any], crf: int, source: Path) -> list[str]
         "-tune",
         "animation" if is_animation(source) else "film",
         "-profile:v",
-        "main",
+        "high",
         "-level:v",
-        "4.0",
+        "4.1",
         "-pix_fmt",
         "yuv420p",
         "-crf",
@@ -462,22 +462,40 @@ def build_audio_args(audio_streams: list[dict[str, Any]]) -> tuple[list[str], li
 
     for audio_index, stream in enumerate(selected_audio):
         maps.extend(["-map", f"0:{stream['index']}"])
-        codecs.extend(
-            [
-                f"-c:a:{audio_index}",
-                "aac",
-                f"-profile:a:{audio_index}",
-                "aac_low",
-                f"-b:a:{audio_index}",
-                "160k",
-                f"-ac:a:{audio_index}",
-                "2",
-                f"-ar:a:{audio_index}",
-                "48000",
-                f"-disposition:a:{audio_index}",
-                "default" if audio_index == 0 else "0",
-            ]
-        )
+
+        codec_name = str(stream.get("codec_name", "")).lower()
+        channels = int(stream.get("channels", 0) or 0)
+        sample_rate = str(stream.get("sample_rate", ""))
+
+        if codec_name == "aac" and channels <= 2 and sample_rate == "48000":
+            print(f"  -> Audio {audio_index}: ja compativel, copiando sem recodificar")
+            codecs.extend(
+                [
+                    f"-c:a:{audio_index}",
+                    "copy",
+                    f"-disposition:a:{audio_index}",
+                    "default" if audio_index == 0 else "0",
+                ]
+            )
+        else:
+            print(f"  -> Audio {audio_index}: convertendo para AAC estereo 48 kHz")
+            codecs.extend(
+                [
+                    f"-c:a:{audio_index}",
+                    "aac",
+                    f"-profile:a:{audio_index}",
+                    "aac_low",
+                    f"-b:a:{audio_index}",
+                    "160k",
+                    f"-ac:a:{audio_index}",
+                    "2",
+                    f"-ar:a:{audio_index}",
+                    "48000",
+                    f"-disposition:a:{audio_index}",
+                    "default" if audio_index == 0 else "0",
+                ]
+            )
+
         metadata.extend([f"-metadata:s:a:{audio_index}", f"language={normalized_language(stream)}"])
         metadata.extend([f"-metadata:s:a:{audio_index}", f"title={stream_title(stream)}"])
     return maps, codecs, metadata
