@@ -33,6 +33,7 @@ LANGUAGE_CODES = {
 
 
 DIRECT_PLAY_VIDEO_PROFILES = {"baseline", "constrained baseline", "main", "high"}
+RETRYABLE_OUTCOMES = {"falha", "rejeitada"}
 
 
 def run_probe(source: Path) -> dict[str, Any] | None:
@@ -580,7 +581,7 @@ def process_file(
     decision_counts: dict[str, int] | None = None,
     overwrite: bool = False,
     encoder: str = "libx264",
-) -> None:
+) -> str:
     relative_parent = source.parent.relative_to(root)
     destination = root / "DirectPlay" / relative_parent
     log_directory = root / "Logs" / relative_parent
@@ -597,7 +598,7 @@ def process_file(
         print(f"Pulando (ja existe): {source}")
         write_log(video_log, "Ignorado: saida ja existe")
         write_log(root_log, f"Ignorado: saida ja existe - {source}")
-        return
+        return "pulado"
     if temporary.exists():
         temporary.unlink()
     if progress_file.exists():
@@ -609,7 +610,7 @@ def process_file(
     if probe is None:
         write_log(video_log, "Falha: ffprobe nao conseguiu analisar a entrada")
         write_log(root_log, f"Falha no ffprobe: {source}")
-        return
+        return "falha"
 
     valid_input, input_problems = validate_input(source, probe)
     if not valid_input:
@@ -618,12 +619,12 @@ def process_file(
             print(f"  - {problem}", file=sys.stderr)
             write_log(video_log, f"Entrada rejeitada: {problem}")
         write_log(root_log, f"Entrada rejeitada: {source}")
-        return
+        return "rejeitada"
 
     video = first_video_stream(probe)
     if video is None:
         print(f"Nenhum fluxo de video encontrado: {source}", file=sys.stderr)
-        return
+        return "falha"
 
     streams = probe.get("streams", [])
     subtitles = [stream for stream in streams if stream.get("codec_type") == "subtitle"]
@@ -647,7 +648,7 @@ def process_file(
     write_log(video_log, f"Decisao: {mode}")
     write_log(root_log, f"Decisao: {source} -> {mode}")
     if analyze_only:
-        return
+        return "analisado"
 
     destination.mkdir(parents=True, exist_ok=True)
     extract_subtitles(source, destination, base_name, subtitles)
@@ -749,16 +750,16 @@ def process_file(
             print("  -> Para processar com CPU, rode novamente com: --encoder libx264", file=sys.stderr)
             write_log(video_log, f"NVENC falhou{detail}; sem fallback automatico para CPU")
             write_log(root_log, f"Falha no NVENC (sem fallback para CPU): {source}")
-            return
+            return "falha"
         write_log(root_log, f"Falha na conversao: {source}")
-        return
+        return "falha"
 
     if temporary.stat().st_size <= 1024 * 1024:
         temporary.unlink(missing_ok=True)
         print(f"Saida descartada por ser menor que 1 MiB: {source}")
         write_log(video_log, "Saida descartada: menor que 1 MiB")
         write_log(root_log, f"Saida descartada por tamanho: {source}")
-        return
+        return "rejeitada"
 
     valid, problems = validate_output(temporary)
     if not valid:
@@ -768,12 +769,13 @@ def process_file(
             print(f"  - {problem}", file=sys.stderr)
             write_log(video_log, f"Saida rejeitada: {problem}")
         write_log(root_log, f"Saida rejeitada na validacao: {source}")
-        return
+        return "rejeitada"
 
     temporary.replace(output)
     print(f"Sucesso -> {output}")
     write_log(video_log, f"Sucesso: {output}")
     write_log(root_log, f"Sucesso: {output}")
+    return "sucesso"
 
 
 def main() -> int:
@@ -784,6 +786,11 @@ def main() -> int:
     mode_group.add_argument("--analyze", action="store_true", help="Apenas analisa e mostra a decisao, sem converter")
     mode_group.add_argument("--full", action="store_true", help="Forca recodificacao completa do video")
     parser.add_argument("--overwrite", action="store_true", help="Reprocessa arquivos que ja possuem saida")
+    parser.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="Reprocessa apenas os arquivos que falharam na execucao anterior",
+    )
     parser.add_argument(
         "--encoder",
         choices=["libx264", "nvenc"],
@@ -815,14 +822,36 @@ def main() -> int:
         print("Encoder de video: nvenc (GPU)")
     print()
 
+    failure_log = root / "directplay_falhas.txt"
+    if args.retry_failed:
+        if not failure_log.exists():
+            parser.error(f"Nenhum arquivo de falhas encontrado: {failure_log}")
+        listed = [
+            line.strip()
+            for line in failure_log.read_text(encoding="utf-8", errors="replace").splitlines()
+            if line.strip()
+        ]
+        existing = [root / entry for entry in listed if (root / entry).is_file()]
+        if len(existing) != len(listed):
+            print(f"{len(listed) - len(existing)} arquivo(s) da lista nao existem mais e serao ignorados.")
+        sources = existing
+        print(f"Reprocessando {len(sources)} arquivo(s) da lista de falhas.")
+    else:
+        sources = [
+            source
+            for source in root.rglob("*")
+            if source.is_file()
+            and source.suffix.lower() in VIDEO_EXTENSIONS
+            and output_root not in source.parents
+            and not source.name.lower().endswith((".tmp.mp4", ".tmp.mkv"))
+        ]
+
     analysis_results: list[tuple[Path, str]] = []
     decision_counts: dict[str, int] = {}
-    for source in root.rglob("*"):
-        if not source.is_file() or source.suffix.lower() not in VIDEO_EXTENSIONS:
-            continue
-        if output_root in source.parents or source.name.lower().endswith((".tmp.mp4", ".tmp.mkv")):
-            continue
-        process_file(
+    outcome_counts: dict[str, int] = {}
+    failures: list[Path] = []
+    for source in sources:
+        outcome = process_file(
             source,
             root,
             args.crf,
@@ -834,6 +863,9 @@ def main() -> int:
             overwrite=args.overwrite,
             encoder=args.encoder,
         )
+        outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
+        if outcome in RETRYABLE_OUTCOMES:
+            failures.append(source.relative_to(root))
 
     if args.analyze:
         if len(analysis_results) == 1:
@@ -862,6 +894,39 @@ def main() -> int:
         write_log(root_log, "Resumo das decisoes:")
         for mode, count in sorted(decision_counts.items()):
             write_log(root_log, f"  {mode}: {count}")
+
+    labels = {
+        "sucesso": "convertidos",
+        "pulado": "pulados (saida ja existia)",
+        "analisado": "analisados",
+        "rejeitada": "rejeitados na validacao",
+        "falha": "falhas",
+    }
+    print(f"\nResumo ({len(sources)} arquivo(s)):")
+    for outcome in labels:
+        count = outcome_counts.get(outcome, 0)
+        if count:
+            print(f"  {labels[outcome]}: {count}")
+    for outcome, count in sorted(outcome_counts.items()):
+        if outcome not in labels:
+            print(f"  {outcome}: {count}")
+    write_log(root_log, "Resumo dos resultados:")
+    for outcome, count in sorted(outcome_counts.items()):
+        write_log(root_log, f"  {outcome}: {count}")
+
+    if failures:
+        print(f"\nFalhas ({len(failures)}):")
+        for relative_source in failures[:20]:
+            print(f"  - {relative_source}")
+        if len(failures) > 20:
+            print(f"  ... e mais {len(failures) - 20} arquivo(s)")
+        failure_log.write_text("\n".join(str(path) for path in failures) + "\n", encoding="utf-8")
+        print(f"Lista salva em: {failure_log}")
+        print("Para tentar novamente: --retry-failed")
+        write_log(root_log, f"Falhas gravadas em {failure_log}")
+    elif failure_log.exists() and not args.analyze:
+        failure_log.unlink()
+
     write_log(root_log, "Processamento concluido")
     return 0
 

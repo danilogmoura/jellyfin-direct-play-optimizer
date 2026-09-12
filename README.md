@@ -93,7 +93,8 @@ Assuming the root is `/media/movies`:
 │   └── <same folder structure as source>/
 │       ├── movie.log
 │       └── movie.progress
-└── directplay_optimizer.log       ← overall run log
+├── directplay_optimizer.log       ← overall run log
+└── directplay_falhas.txt          ← failures of the last run (only when there are any)
 ```
 
 - Source files are **never modified**.
@@ -199,9 +200,22 @@ The default encoder is the CPU (`libx264`). Pass `--encoder nvenc` to encode on 
 | `--analyze` | Analyze and show the decision only, without converting. |
 | `--full` | Force **full re-encode** for every file. |
 | `--overwrite` | Reprocess files that already have output under `DirectPlay/`. |
+| `--retry-failed` | Reprocess only the files that failed in the previous run. |
 | `--encoder {libx264,nvenc}` | Video encoder: `libx264` (CPU, default) or `nvenc` (NVIDIA GPU). |
 
 `--analyze` and `--full` are mutually exclusive. `--encoder` applies only to **full re-encode**; `remux` and `copy video + convert audio` never re-encode the video file.
+
+### Run summary and retrying failures
+
+When a run ends, the script prints a summary with the outcome of every file — converted, skipped (output already existed), analyzed, rejected in validation, and failed — and writes the same counts to the overall log.
+
+If anything failed, up to 20 relative paths are printed and all of them are saved to `directplay_falhas.txt` at the root of the input folder, so they can be retried with:
+
+```bash
+python jellyfin_direct_play_optimizer.py /media/movies --retry-failed
+```
+
+The file is rewritten on every run that has failures and removed when a run finishes with none, so `--retry-failed` always points at the most recent failures. `--analyze` never removes it (handy to inspect the problem files first).
 
 ### Examples
 
