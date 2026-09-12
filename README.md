@@ -46,7 +46,7 @@ The script always tries the **lightest possible path**, in this order:
 When both video **and** audio are already in formats Jellyfin accepts:
 
 - Source container is already MP4 (or compatible);
-- Video: H.264, Baseline/Main/High profile, level ≤ 4.1, `yuv420p`, ≤ 1920×1080, no HDR, not interlaced, CFR, ≤ 30 fps;
+- Video: H.264, Baseline/Constrained Baseline/Main/High profile, level ≤ 4.1, `yuv420p`, ≤ 1920×1080, no HDR, not interlaced, CFR, ≤ 30 fps;
 - Audio: AAC, ≤ 2 channels, 48 kHz.
 
 → Just repackages. **Fast**, with virtually no quality loss.
@@ -160,6 +160,9 @@ Before accepting a file, the script checks both **input** and **output**.
 - Container is MP4;
 - Exactly 1 video stream;
 - Video is H.264, `yuv420p`;
+- Video profile is Baseline, Constrained Baseline, Main or High;
+- Video level ≤ 4.1;
+- Video codec tag is `avc1`;
 - Resolution ≤ 1920×1080;
 - Framerate ≤ 30 fps;
 - No HDR metadata;

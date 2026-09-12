@@ -32,6 +32,9 @@ LANGUAGE_CODES = {
 }
 
 
+DIRECT_PLAY_VIDEO_PROFILES = {"baseline", "constrained baseline", "main", "high"}
+
+
 def run_probe(source: Path) -> dict[str, Any] | None:
     command = [
         "ffprobe",
@@ -213,6 +216,12 @@ def validate_output(output: Path) -> tuple[bool, list[str]]:
         video = videos[0]
         if str(video.get("codec_name", "")).lower() != "h264":
             problems.append(f"codec de video invalido: {video.get('codec_name', 'desconhecido')}")
+        if str(video.get("profile", "")).lower() not in DIRECT_PLAY_VIDEO_PROFILES:
+            problems.append(f"profile de video invalido: {video.get('profile', 'desconhecido')}")
+        if int(video.get("level", 0) or 0) > 41:
+            problems.append(f"level de video acima do limite: {video.get('level', 'desconhecido')}")
+        if str(video.get("codec_tag_string", "")).lower() != "avc1":
+            problems.append(f"codec tag de video invalida: {video.get('codec_tag_string', 'desconhecido')}")
         if str(video.get("pix_fmt", "")).lower() != "yuv420p":
             problems.append(f"pixel format invalido: {video.get('pix_fmt', 'desconhecido')}")
         if int(video.get("width", 0)) > 1920 or int(video.get("height", 0)) > 1080:
@@ -254,7 +263,7 @@ def is_video_copy_compatible(video: dict[str, Any]) -> bool:
     level = int(video.get("level", 0) or 0)
     return (
         str(video.get("codec_name", "")).lower() == "h264"
-        and profile in {"baseline", "main", "high"}
+        and profile in DIRECT_PLAY_VIDEO_PROFILES
         and level <= 41
         and str(video.get("pix_fmt", "")).lower() == "yuv420p"
         and int(video.get("width", 0)) <= 1920
