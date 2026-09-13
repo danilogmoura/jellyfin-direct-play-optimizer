@@ -33,26 +33,26 @@ LANGUAGE_CODES = {
 
 
 DIRECT_PLAY_VIDEO_PROFILES = {"baseline", "constrained baseline", "main", "high"}
-RETRYABLE_OUTCOMES = {"falha", "rejeitada"}
+RETRYABLE_OUTCOMES = {"failed", "rejected"}
 DIRECT_PLAY_AUDIO_PROFILES = {"lc", ""}
 IMAGE_SUBTITLE_CODECS = {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub"}
 AUDIT_CONDITION_LABELS = {
-    "container": "container fora do MP4 (remux resolve)",
-    "video_codec": "video nao-H264",
-    "video_profile": "profile de video fora do aceito",
-    "video_level": "level do video acima de 4.1",
-    "video_pix_fmt": "pixel format diferente de yuv420p",
-    "video_resolucao": "resolucao acima de 1080p",
-    "video_fps": "framerate acima de 30 fps",
-    "video_vfr": "framerate variavel (VFR)",
-    "video_entrelacado": "video entrelacado",
+    "container": "container outside MP4 (a remux solves it)",
+    "video_codec": "video is not H.264",
+    "video_profile": "video profile outside the accepted set",
+    "video_level": "video level above 4.1",
+    "video_pix_fmt": "pixel format other than yuv420p",
+    "video_resolution": "resolution above 1080p",
+    "video_fps": "frame rate above 30 fps",
+    "video_vfr": "variable frame rate (VFR)",
+    "video_interlaced": "interlaced video",
     "video_hdr": "HDR / Dolby Vision",
-    "video_anamorfico": "video anamorfico (SAR diferente de 1:1)",
-    "audio_codec": "audio nao-AAC",
-    "audio_canais": "audio com mais de 2 canais",
-    "audio_sample_rate": "audio com sample rate diferente de 48 kHz",
-    "audio_profile": "audio HE-AAC (profile diferente de LC)",
-    "legenda_imagem": "legenda de imagem (PGS/VobSub)",
+    "video_anamorphic": "anamorphic video (SAR other than 1:1)",
+    "audio_codec": "audio is not AAC",
+    "audio_channels": "audio with more than 2 channels",
+    "audio_sample_rate": "audio sample rate other than 48 kHz",
+    "audio_profile": "HE-AAC audio (profile other than LC)",
+    "image_subtitles": "image-based subtitles (PGS/VobSub)",
 }
 AUDIT_MAX_EXAMPLES = 10
 
@@ -70,7 +70,7 @@ def run_probe(source: Path) -> dict[str, Any] | None:
     ]
     result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if result.returncode != 0 or not result.stdout.strip():
-        print(f"Falha ao analisar: {source}", file=sys.stderr)
+        print(f"Failed to probe: {source}", file=sys.stderr)
         if result.stderr.strip():
             print(result.stderr.strip(), file=sys.stderr)
         return None
@@ -78,7 +78,7 @@ def run_probe(source: Path) -> dict[str, Any] | None:
     try:
         return json.loads(result.stdout)
     except json.JSONDecodeError as error:
-        print(f"JSON invalido do ffprobe para {source}: {error}", file=sys.stderr)
+        print(f"Invalid ffprobe JSON for {source}: {error}", file=sys.stderr)
         return None
 
 
@@ -110,17 +110,17 @@ def validate_input(source: Path, probe: dict[str, Any]) -> tuple[bool, list[str]
     problems: list[str] = []
     format_duration = parse_duration(probe.get("format", {}).get("duration"))
     if format_duration <= 0:
-        problems.append("duracao ausente ou invalida")
+        problems.append("missing or invalid duration")
 
     video = first_video_stream(probe)
     if video is None:
-        problems.append("nenhum fluxo de video valido")
+        problems.append("no valid video stream")
     else:
         video_duration = parse_duration(video.get("duration"))
         if video_duration > 0 and format_duration > 0:
             difference = abs(format_duration - video_duration)
             if difference > max(2.0, format_duration * 0.05):
-                problems.append("duracao do video difere significativamente do container")
+                problems.append("video duration differs significantly from the container")
 
     if problems:
         return False, problems
@@ -152,9 +152,9 @@ def validate_input(source: Path, probe: dict[str, Any]) -> tuple[bool, list[str]
         ]
         result = subprocess.run(tail_check, capture_output=True, text=True, encoding="utf-8", errors="replace")
         if result.returncode != 0:
-            problems.append(f"falha ao ler o final do fluxo de {label}")
+            problems.append(f"failed to read the end of the {label} stream")
             if result.stderr.strip():
-                print(f"  -> Diagnostico: {result.stderr.strip()}", file=sys.stderr)
+                print(f"  -> Diagnostics: {result.stderr.strip()}", file=sys.stderr)
     return not problems, problems
 
 
@@ -224,46 +224,46 @@ def target_frame_rate(video: dict[str, Any]) -> str | None:
 def validate_output(output: Path) -> tuple[bool, list[str]]:
     probe = run_probe(output)
     if probe is None:
-        return False, ["ffprobe nao conseguiu ler a saida"]
+        return False, ["ffprobe could not read the output"]
 
     problems: list[str] = []
     format_name = str(probe.get("format", {}).get("format_name", "")).lower()
     if "mp4" not in format_name:
-        problems.append(f"container invalido: {format_name or 'desconhecido'}")
+        problems.append(f"invalid container: {format_name or 'unknown'}")
 
     videos = [stream for stream in probe.get("streams", []) if stream.get("codec_type") == "video"]
     if len(videos) != 1:
-        problems.append(f"quantidade de videos invalida: {len(videos)}")
+        problems.append(f"invalid video stream count: {len(videos)}")
     else:
         video = videos[0]
         if str(video.get("codec_name", "")).lower() != "h264":
-            problems.append(f"codec de video invalido: {video.get('codec_name', 'desconhecido')}")
+            problems.append(f"invalid video codec: {video.get('codec_name', 'unknown')}")
         if str(video.get("profile", "")).lower() not in DIRECT_PLAY_VIDEO_PROFILES:
-            problems.append(f"profile de video invalido: {video.get('profile', 'desconhecido')}")
+            problems.append(f"invalid video profile: {video.get('profile', 'unknown')}")
         if int(video.get("level", 0) or 0) > 41:
-            problems.append(f"level de video acima do limite: {video.get('level', 'desconhecido')}")
+            problems.append(f"video level above the limit: {video.get('level', 'unknown')}")
         if str(video.get("codec_tag_string", "")).lower() != "avc1":
-            problems.append(f"codec tag de video invalida: {video.get('codec_tag_string', 'desconhecido')}")
+            problems.append(f"invalid video codec tag: {video.get('codec_tag_string', 'unknown')}")
         if str(video.get("pix_fmt", "")).lower() != "yuv420p":
-            problems.append(f"pixel format invalido: {video.get('pix_fmt', 'desconhecido')}")
+            problems.append(f"invalid pixel format: {video.get('pix_fmt', 'unknown')}")
         if int(video.get("width", 0)) > 1920 or int(video.get("height", 0)) > 1080:
-            problems.append(f"resolucao acima do limite: {video.get('width')}x{video.get('height')}")
+            problems.append(f"resolution above the limit: {video.get('width')}x{video.get('height')}")
         if parse_frame_rate(video) > 30.001 or parse_frame_rate(video, "avg_frame_rate") > 30.001:
-            problems.append("framerate acima de 30 fps")
+            problems.append("frame rate above 30 fps")
         if is_hdr(video):
-            problems.append("saida ainda contem metadados HDR")
+            problems.append("output still carries HDR metadata")
         if str(video.get("field_order", "progressive")).lower() not in {"progressive", "unknown", ""}:
-            problems.append("saida ainda esta entrelacada")
+            problems.append("output is still interlaced")
 
     for stream in probe.get("streams", []):
         if stream.get("codec_type") != "audio":
             continue
         if str(stream.get("codec_name", "")).lower() != "aac":
-            problems.append(f"codec de audio invalido: {stream.get('codec_name', 'desconhecido')}")
+            problems.append(f"invalid audio codec: {stream.get('codec_name', 'unknown')}")
         if int(stream.get("channels", 0)) > 2:
-            problems.append("audio com mais de dois canais")
+            problems.append("audio with more than two channels")
         if str(stream.get("sample_rate", "")) != "48000":
-            problems.append(f"sample rate de audio invalido: {stream.get('sample_rate', 'desconhecido')}")
+            problems.append(f"invalid audio sample rate: {stream.get('sample_rate', 'unknown')}")
 
     return not problems, problems
 
@@ -370,7 +370,7 @@ def extract_subtitles(source: Path, destination: Path, base_name: str, streams: 
 
         language = stream_language(stream)
         title = stream_title(stream)
-        print(f"  -> Extraindo legenda ({language}): {title} -> {target}")
+        print(f"  -> Extracting subtitle ({language}): {title} -> {target}")
         command = [
             "ffmpeg",
             "-nostdin",
@@ -398,7 +398,11 @@ def copy_external_subtitles(source: Path, destination: Path, base_name: str) -> 
 
 
 def is_allowed_subtitle_name(name: str, base_name: str) -> bool:
-    relative_name = name[len(base_name):] if name.lower().startswith(base_name.lower()) else name
+    if not name.lower().startswith(base_name.lower()):
+        return False
+    relative_name = name[len(base_name):]
+    if relative_name and relative_name[0] not in "._- ":
+        return False
     lowered_name = relative_name.lower()
     if re.search(r"(?i)(^|[._-])(?:forced|forçada)(?=$|[._-])", lowered_name):
         return True
@@ -412,11 +416,11 @@ def is_allowed_subtitle_name(name: str, base_name: str) -> bool:
 def build_video_args(video: dict[str, Any], crf: int, source: Path, encoder: str = "libx264") -> list[str]:
     filter_prefix = ""
     if is_interlaced(video):
-        print("  -> Video: Entrelaçado detectado; aplicando desentrelaçamento...")
+        print("  -> Video: interlaced source detected; applying deinterlacing...")
         filter_prefix = "yadif=mode=0:parity=auto:deint=all,"
 
     if is_hdr(video):
-        print("  -> Video: HDR para SDR com tonemapping...")
+        print("  -> Video: HDR to SDR with tone mapping...")
         filter_value = (
             filter_prefix +
             "zscale=transfer=linear:npl=100,format=gbrpf32le,"
@@ -425,7 +429,7 @@ def build_video_args(video: dict[str, Any], crf: int, source: Path, encoder: str
             "format=yuv420p"
         )
     else:
-        print("  -> Video: H.264 SDR compativel...")
+        print("  -> Video: H.264 SDR compatible...")
         range_filter = ",scale=in_range=full:out_range=limited" if is_full_range(video) else ""
         filter_value = (
             filter_prefix +
@@ -453,7 +457,7 @@ def build_video_args(video: dict[str, Any], crf: int, source: Path, encoder: str
     ]
 
     if encoder == "nvenc":
-        print("  -> Video: usando NVENC (GPU)...")
+        print("  -> Video: using NVENC (GPU)...")
         args = [
             "-vf",
             filter_value,
@@ -487,7 +491,7 @@ def build_video_args(video: dict[str, Any], crf: int, source: Path, encoder: str
         ]
     output_frame_rate = target_frame_rate(video)
     if is_variable_frame_rate(video):
-        print(f"  -> Video: VFR detectado; normalizando para {output_frame_rate} fps...")
+        print(f"  -> Video: VFR detected; normalizing to {output_frame_rate} fps...")
     if output_frame_rate:
         args.extend(["-r", output_frame_rate])
     return args
@@ -513,7 +517,7 @@ def build_audio_args(audio_streams: list[dict[str, Any]]) -> tuple[list[str], li
     selected_audio = select_audio_streams(audio_streams)
     if selected_audio:
         selected = selected_audio[0]
-        print(f"  -> Audio padrão: {stream_language(selected)} - {stream_title(selected) or 'faixa principal'}")
+        print(f"  -> Default audio: {stream_language(selected)} - {stream_title(selected) or 'main track'}")
 
     for audio_index, stream in enumerate(selected_audio):
         maps.extend(["-map", f"0:{stream['index']}"])
@@ -523,7 +527,7 @@ def build_audio_args(audio_streams: list[dict[str, Any]]) -> tuple[list[str], li
         sample_rate = str(stream.get("sample_rate", ""))
 
         if codec_name == "aac" and channels <= 2 and sample_rate == "48000":
-            print(f"  -> Audio {audio_index}: ja compativel, copiando sem recodificar")
+            print(f"  -> Audio {audio_index}: already compatible, copying without re-encoding")
             codecs.extend(
                 [
                     f"-c:a:{audio_index}",
@@ -533,7 +537,7 @@ def build_audio_args(audio_streams: list[dict[str, Any]]) -> tuple[list[str], li
                 ]
             )
         else:
-            print(f"  -> Audio {audio_index}: convertendo para AAC estereo 48 kHz")
+            print(f"  -> Audio {audio_index}: converting to AAC stereo 48 kHz")
             codecs.extend(
                 [
                     f"-c:a:{audio_index}",
@@ -557,21 +561,28 @@ def build_audio_args(audio_streams: list[dict[str, Any]]) -> tuple[list[str], li
 
 
 NVENC_ERROR_HINTS = (
-    (("cannot load nvcuda", "nvcuda.dll", "cannot load libcuda", "libcuda"), "driver/CUDA da NVIDIA nao disponivel"),
+    (
+        ("cuda_error_no_device", "no cuda-capable device", "no cuda capable device", "cuinit(0) failed"),
+        "no CUDA-capable device detected (check that the GPU is visible to the process)",
+    ),
+    (("cannot load nvcuda", "nvcuda.dll", "cannot load libcuda", "libcuda"), "NVIDIA driver/CUDA not available"),
     (
         ("no nvenc capable devices", "no capable devices found", "openencodesessionex"),
-        "nenhum dispositivo NVENC disponivel",
+        "no NVENC capable device available",
     ),
-    (("unknown encoder", "h264_nvenc"), "o ffmpeg atual nao inclui o encoder h264_nvenc"),
     (
         ("driver does not support", "minimum required nvidia driver"),
-        "driver NVIDIA antigo para esta versao do ffmpeg",
+        "NVIDIA driver too old for this ffmpeg version",
+    ),
+    (
+        ("unknown encoder", "encoder not found", "no such encoder"),
+        "this ffmpeg build does not include the h264_nvenc encoder",
     ),
     (
         ("error setting option preset", "error setting option tune", "error setting option rc", "error setting option cq"),
-        "opcoes do NVENC nao suportadas por esta versao do ffmpeg",
+        "NVENC options not supported by this ffmpeg version",
     ),
-    (("error while opening encoder", "initialize encoder failed"), "falha ao inicializar o encoder NVENC"),
+    (("error while opening encoder", "initialize encoder failed"), "failed to initialize the NVENC encoder"),
 )
 
 
@@ -579,7 +590,7 @@ def detect_nvenc_error(video_log: Path) -> str | None:
     if not video_log.exists():
         return None
     text = video_log.read_text(encoding="utf-8", errors="replace")
-    command_marker = text.rfind("Comando:")
+    command_marker = text.rfind("Command:")
     if command_marker != -1:
         command_end = text.find("\n", command_marker)
         if command_end != -1:
@@ -613,71 +624,71 @@ def process_file(
     output = destination / f"{base_name}.mp4"
     video_log = log_directory / f"{base_name}.log"
     progress_file = log_directory / f"{base_name}.progress"
-    write_log(video_log, f"Iniciando: {source}")
-    write_log(root_log, f"Iniciando: {source}")
+    write_log(video_log, f"Starting: {source}")
+    write_log(root_log, f"Starting: {source}")
     if output.exists() and not analyze_only and not overwrite:
-        print(f"Pulando (ja existe): {source}")
-        write_log(video_log, "Ignorado: saida ja existe")
-        write_log(root_log, f"Ignorado: saida ja existe - {source}")
-        return "pulado"
+        print(f"Skipping (already exists): {source}")
+        write_log(video_log, "Skipped: output already exists")
+        write_log(root_log, f"Skipped: output already exists - {source}")
+        return "skipped"
     if temporary.exists():
         temporary.unlink()
     if progress_file.exists():
         progress_file.unlink()
 
     if not analyze_only:
-        print(f"\n----------------------------------------\nProcessando: {source}")
+        print(f"\n----------------------------------------\nProcessing: {source}")
     probe = run_probe(source)
     if probe is None:
-        write_log(video_log, "Falha: ffprobe nao conseguiu analisar a entrada")
-        write_log(root_log, f"Falha no ffprobe: {source}")
-        return "falha"
+        write_log(video_log, "Failure: ffprobe could not parse the input")
+        write_log(root_log, f"ffprobe failure: {source}")
+        return "failed"
 
     valid_input, input_problems = validate_input(source, probe)
     if not valid_input:
-        print(f"Entrada rejeitada na validacao: {source}", file=sys.stderr)
+        print(f"Input rejected in validation: {source}", file=sys.stderr)
         for problem in input_problems:
             print(f"  - {problem}", file=sys.stderr)
-            write_log(video_log, f"Entrada rejeitada: {problem}")
-        write_log(root_log, f"Entrada rejeitada: {source}")
-        return "rejeitada"
+            write_log(video_log, f"Input rejected: {problem}")
+        write_log(root_log, f"Input rejected: {source}")
+        return "rejected"
 
     video = first_video_stream(probe)
     if video is None:
-        print(f"Nenhum fluxo de video encontrado: {source}", file=sys.stderr)
-        return "falha"
+        print(f"No video stream found: {source}", file=sys.stderr)
+        return "failed"
 
     streams = probe.get("streams", [])
     subtitles = [stream for stream in streams if stream.get("codec_type") == "subtitle"]
     audio = [stream for stream in streams if stream.get("codec_type") == "audio"]
 
     if force_full:
-        mode = "recodificacao completa"
+        mode = "full re-encode"
     elif is_remux_compatible(probe, video, audio):
         mode = "remux"
     elif is_video_copy_compatible(video):
-        mode = "copiar video + converter audio"
+        mode = "copy video + convert audio"
     else:
-        mode = "recodificacao completa"
+        mode = "full re-encode"
 
     if analyze_only and analysis_results is not None:
         analysis_results.append((source.relative_to(root), mode))
     else:
-        print(f"  -> Decisao: {mode}")
+        print(f"  -> Decision: {mode}")
     if decision_counts is not None:
         decision_counts[mode] = decision_counts.get(mode, 0) + 1
-    write_log(video_log, f"Decisao: {mode}")
-    write_log(root_log, f"Decisao: {source} -> {mode}")
+    write_log(video_log, f"Decision: {mode}")
+    write_log(root_log, f"Decision: {source} -> {mode}")
     if analyze_only:
-        return "analisado"
+        return "analyzed"
 
     destination.mkdir(parents=True, exist_ok=True)
     extract_subtitles(source, destination, base_name, subtitles)
     copy_external_subtitles(source, destination, base_name)
 
     if mode == "remux":
-        print("  -> Video/audio ja compativeis; fazendo REMUX rapido...")
-        write_log(video_log, "Modo: remux sem recodificacao")
+        print("  -> Video/audio already compatible; doing a fast REMUX...")
+        write_log(video_log, "Mode: remux without re-encoding")
         audio_maps, _, metadata_args = build_audio_args(audio)
         disposition_args: list[str] = []
         for audio_index in range(len(audio)):
@@ -686,15 +697,15 @@ def process_file(
                 "default" if audio_index == 0 else "0",
             ])
         codec_args = ["-c", "copy", *disposition_args]
-    elif mode == "copiar video + converter audio":
-        print("  -> Video compativel; copiando video e convertendo apenas o audio...")
-        write_log(video_log, "Modo: video copy com conversao de audio")
+    elif mode == "copy video + convert audio":
+        print("  -> Video compatible; copying video and converting audio only...")
+        write_log(video_log, "Mode: video copy with audio conversion")
         audio_maps, audio_args, metadata_args = build_audio_args(audio)
         codec_args = ["-c:v", "copy"] + audio_args
     else:
         audio_maps, audio_args, metadata_args = build_audio_args(audio)
         codec_args = build_video_args(video, crf, source, encoder) + audio_args
-        write_log(video_log, "Modo: recodificacao" + (" (nvenc)" if encoder == "nvenc" else ""))
+        write_log(video_log, "Mode: full re-encode" + (" (nvenc)" if encoder == "nvenc" else ""))
     command = [
         "ffmpeg",
         "-nostdin",
@@ -720,7 +731,7 @@ def process_file(
         str(temporary),
     ]
 
-    write_log(video_log, "Comando: " + " ".join(command))
+    write_log(video_log, "Command: " + " ".join(command))
     start_time = datetime.now()
     with video_log.open("a", encoding="utf-8") as log_handle:
         process = subprocess.Popen(
@@ -744,8 +755,8 @@ def process_file(
                 duration = parse_duration(probe.get("format", {}).get("duration"))
                 percent = min(100.0, out_seconds / duration * 100) if duration else 0.0
                 status = (
-                    f"  -> {percent:6.2f}% | tempo {format_seconds(str(out_seconds))} | "
-                    f"velocidade {progress_data.get('speed', '?')} | "
+                    f"  -> {percent:6.2f}% | time {format_seconds(str(out_seconds))} | "
+                    f"speed {progress_data.get('speed', '?')} | "
                     f"dup {progress_data.get('dup_frames', '0')} | "
                     f"drop {progress_data.get('drop_frames', '0')}"
                 )
@@ -757,46 +768,46 @@ def process_file(
     if progress_file.exists():
         progress_file.unlink()
     print()
-    write_log(video_log, f"Conversao finalizada em {datetime.now() - start_time}")
+    write_log(video_log, f"Conversion finished in {datetime.now() - start_time}")
 
     if result_code != 0 or not temporary.exists():
         temporary.unlink(missing_ok=True)
-        print(f"Falha ao converter: {source}", file=sys.stderr)
-        write_log(video_log, f"Falha na conversao: codigo {result_code}")
+        print(f"Failed to convert: {source}", file=sys.stderr)
+        write_log(video_log, f"Conversion failed: code {result_code}")
         if encoder == "nvenc":
             nvenc_error = detect_nvenc_error(video_log)
             detail = f": {nvenc_error}" if nvenc_error else ""
-            print(f"  -> Falha no encoder NVENC{detail}.", file=sys.stderr)
-            print("  -> Nenhum fallback automatico para CPU sera feito.", file=sys.stderr)
-            print("  -> Para processar com CPU, rode novamente com: --encoder libx264", file=sys.stderr)
-            write_log(video_log, f"NVENC falhou{detail}; sem fallback automatico para CPU")
-            write_log(root_log, f"Falha no NVENC (sem fallback para CPU): {source}")
-            return "falha"
-        write_log(root_log, f"Falha na conversao: {source}")
-        return "falha"
+            print(f"  -> NVENC encoder failure{detail}.", file=sys.stderr)
+            print("  -> No automatic fallback to CPU will be performed.", file=sys.stderr)
+            print("  -> To process with CPU, run again with: --encoder libx264", file=sys.stderr)
+            write_log(video_log, f"NVENC failed{detail}; no automatic fallback to CPU")
+            write_log(root_log, f"NVENC failure (no CPU fallback): {source}")
+            return "failed"
+        write_log(root_log, f"Conversion failed: {source}")
+        return "failed"
 
     if temporary.stat().st_size <= 1024 * 1024:
         temporary.unlink(missing_ok=True)
-        print(f"Saida descartada por ser menor que 1 MiB: {source}")
-        write_log(video_log, "Saida descartada: menor que 1 MiB")
-        write_log(root_log, f"Saida descartada por tamanho: {source}")
-        return "rejeitada"
+        print(f"Output discarded for being smaller than 1 MiB: {source}")
+        write_log(video_log, "Output discarded: smaller than 1 MiB")
+        write_log(root_log, f"Output discarded by size: {source}")
+        return "rejected"
 
     valid, problems = validate_output(temporary)
     if not valid:
         temporary.unlink(missing_ok=True)
-        print(f"Saida rejeitada na validacao: {source}", file=sys.stderr)
+        print(f"Output rejected in validation: {source}", file=sys.stderr)
         for problem in problems:
             print(f"  - {problem}", file=sys.stderr)
-            write_log(video_log, f"Saida rejeitada: {problem}")
-        write_log(root_log, f"Saida rejeitada na validacao: {source}")
-        return "rejeitada"
+            write_log(video_log, f"Output rejected: {problem}")
+        write_log(root_log, f"Output rejected in validation: {source}")
+        return "rejected"
 
     temporary.replace(output)
-    print(f"Sucesso -> {output}")
-    write_log(video_log, f"Sucesso: {output}")
-    write_log(root_log, f"Sucesso: {output}")
-    return "sucesso"
+    print(f"Success -> {output}")
+    write_log(video_log, f"Success: {output}")
+    write_log(root_log, f"Success: {output}")
+    return "success"
 
 
 def is_anamorphic(video: dict[str, Any]) -> bool:
@@ -818,37 +829,38 @@ def audit_conditions(
 
     if str(video.get("codec_name", "")).lower() != "h264":
         conditions.append("video_codec")
-    if str(video.get("profile", "")).lower() not in DIRECT_PLAY_VIDEO_PROFILES:
-        conditions.append("video_profile")
-    if int(video.get("level", 0) or 0) > 41:
-        conditions.append("video_level")
+    else:
+        if str(video.get("profile", "")).lower() not in DIRECT_PLAY_VIDEO_PROFILES:
+            conditions.append("video_profile")
+        if int(video.get("level", 0) or 0) > 41:
+            conditions.append("video_level")
     if str(video.get("pix_fmt", "")).lower() != "yuv420p":
         conditions.append("video_pix_fmt")
     if int(video.get("width", 0)) > 1920 or int(video.get("height", 0)) > 1080:
-        conditions.append("video_resolucao")
+        conditions.append("video_resolution")
     if parse_frame_rate(video) > 30.001 or parse_frame_rate(video, "avg_frame_rate") > 30.001:
         conditions.append("video_fps")
     if is_variable_frame_rate(video):
         conditions.append("video_vfr")
     if is_interlaced(video):
-        conditions.append("video_entrelacado")
+        conditions.append("video_interlaced")
     if is_hdr(video):
         conditions.append("video_hdr")
     if is_anamorphic(video):
-        conditions.append("video_anamorfico")
+        conditions.append("video_anamorphic")
 
     for stream in audio_streams:
         if str(stream.get("codec_name", "")).lower() != "aac":
             conditions.append("audio_codec")
         if int(stream.get("channels", 0) or 0) > 2:
-            conditions.append("audio_canais")
+            conditions.append("audio_channels")
         if str(stream.get("sample_rate", "")) != "48000":
             conditions.append("audio_sample_rate")
-        if str(stream.get("profile", "")).lower() not in DIRECT_PLAY_AUDIO_PROFILES:
+        if str(stream.get("profile") or "").lower() not in DIRECT_PLAY_AUDIO_PROFILES:
             conditions.append("audio_profile")
 
     if any(str(stream.get("codec_name", "")).lower() in IMAGE_SUBTITLE_CODECS for stream in subtitle_streams):
-        conditions.append("legenda_imagem")
+        conditions.append("image_subtitles")
 
     unique: list[str] = []
     for condition in conditions:
@@ -859,10 +871,10 @@ def audit_conditions(
 
 def audit_decision(probe: dict[str, Any], video: dict[str, Any], audio_streams: list[dict[str, Any]]) -> str:
     if is_remux_compatible(probe, video, audio_streams):
-        return "nada (ja compativel)"
+        return "nothing (already compatible)"
     if is_video_copy_compatible(video):
-        return "copiar video + converter audio"
-    return "recodificacao completa"
+        return "copy video + convert audio"
+    return "full re-encode"
 
 
 def audit_library(sources: list[Path], root: Path, audit_log: Path, root_log: Path) -> int:
@@ -871,7 +883,7 @@ def audit_library(sources: list[Path], root: Path, audit_log: Path, root_log: Pa
     condition_examples: dict[str, list[Path]] = {}
     unreadable: list[Path] = []
 
-    print(f"Auditando {len(sources)} arquivo(s). Nada sera convertido.\n")
+    print(f"Auditing {len(sources)} file(s). Nothing will be converted.\n")
     for index, source in enumerate(sources, start=1):
         probe = run_probe(source)
         video = first_video_stream(probe) if probe else None
@@ -892,19 +904,19 @@ def audit_library(sources: list[Path], root: Path, audit_log: Path, root_log: Pa
             condition_examples.setdefault(condition, []).append(relative)
 
         if index % 100 == 0:
-            print(f"  ... {index} arquivo(s) auditado(s)")
+            print(f"  ... {index} file(s) audited")
 
-    print(f"\nAuditoria concluida: {len(sources)} arquivo(s).\n")
+    print(f"\nAudit finished: {len(sources)} file(s).\n")
 
-    print("O que o script faria:")
-    for decision in ("nada (ja compativel)", "copiar video + converter audio", "recodificacao completa"):
+    print("What the script would do:")
+    for decision in ("nothing (already compatible)", "copy video + convert audio", "full re-encode"):
         count = decision_counts.get(decision, 0)
         if count:
             print(f"  {decision}: {count}")
 
-    print("\nCondicoes encontradas nas origens:")
+    print("\nConditions found in the sources:")
     if not condition_counts:
-        print("  nenhuma")
+        print("  none")
     for condition, label in AUDIT_CONDITION_LABELS.items():
         count = condition_counts.get(condition, 0)
         if not count:
@@ -914,21 +926,21 @@ def audit_library(sources: list[Path], root: Path, audit_log: Path, root_log: Pa
             print(f"      - {example}")
         remaining = count - AUDIT_MAX_EXAMPLES
         if remaining > 0:
-            print(f"      ... e mais {remaining} arquivo(s)")
+            print(f"      ... and {remaining} more file(s)")
 
     if unreadable:
-        print(f"\nNao foi possivel analisar ({len(unreadable)}):")
+        print(f"\nCould not be probed ({len(unreadable)}):")
         for relative in unreadable[:AUDIT_MAX_EXAMPLES]:
             print(f"  - {relative}")
         if len(unreadable) > AUDIT_MAX_EXAMPLES:
-            print(f"  ... e mais {len(unreadable) - AUDIT_MAX_EXAMPLES} arquivo(s)")
+            print(f"  ... and {len(unreadable) - AUDIT_MAX_EXAMPLES} more file(s)")
 
-    lines = [f"Auditoria de Direct Play - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", f"Raiz: {root}", ""]
-    lines.append("== O que o script faria ==")
+    lines = [f"Direct Play audit - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", f"Root: {root}", ""]
+    lines.append("== What the script would do ==")
     for decision, count in sorted(decision_counts.items()):
         lines.append(f"{decision}: {count}")
     lines.append("")
-    lines.append("== Condicoes de risco (nao mutuamente exclusivas) ==")
+    lines.append("== Risk conditions (not mutually exclusive) ==")
     for condition, label in AUDIT_CONDITION_LABELS.items():
         count = condition_counts.get(condition, 0)
         if not count:
@@ -938,84 +950,89 @@ def audit_library(sources: list[Path], root: Path, audit_log: Path, root_log: Pa
             lines.append(f"  - {example}")
     if unreadable:
         lines.append("")
-        lines.append("== Nao foi possivel analisar ==")
+        lines.append("== Could not be probed ==")
         for relative in unreadable:
             lines.append(f"  - {relative}")
     audit_log.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    print(f"\nRelatorio detalhado: {audit_log}")
-    write_log(root_log, f"Auditoria concluida: {len(sources)} arquivo(s)")
+    print(f"\nDetailed report: {audit_log}")
+    write_log(root_log, f"Audit finished: {len(sources)} file(s)")
     for condition, count in sorted(condition_counts.items()):
         write_log(root_log, f"  {condition}: {count}")
     return 0
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Converte videos para MP4 Direct Play do Jellyfin.")
-    parser.add_argument("path", nargs="?", default=".", help="Diretorio raiz de entrada")
-    parser.add_argument("--crf", type=int, default=20, help="CRF do H.264, de 0 a 51 (padrao: 20)")
+    parser = argparse.ArgumentParser(description="Converts videos to Jellyfin Direct Play MP4.")
+    parser.add_argument("path", nargs="?", default=".", help="Root input directory")
+    parser.add_argument("--crf", type=int, default=20, help="H.264 CRF, from 0 to 51 (default: 20)")
     mode_group = parser.add_mutually_exclusive_group()
-    mode_group.add_argument("--analyze", action="store_true", help="Apenas analisa e mostra a decisao, sem converter")
-    mode_group.add_argument("--full", action="store_true", help="Forca recodificacao completa do video")
+    mode_group.add_argument("--analyze", action="store_true", help="Only analyze and show the decision, without converting")
+    mode_group.add_argument("--full", action="store_true", help="Force full re-encode of the video")
     mode_group.add_argument(
         "--audit",
         action="store_true",
-        help="Apenas lista as condicoes de risco das origens, sem converter (varredura rapida)",
+        help="Only list the risk conditions of the sources, without converting (fast scan)",
     )
-    parser.add_argument("--overwrite", action="store_true", help="Reprocessa arquivos que ja possuem saida")
+    parser.add_argument("--overwrite", action="store_true", help="Reprocess files that already have output")
     parser.add_argument(
         "--retry-failed",
         action="store_true",
-        help="Reprocessa apenas os arquivos que falharam na execucao anterior",
+        help="Reprocess only the files that failed in the previous run",
     )
     parser.add_argument(
         "--encoder",
         choices=["libx264", "nvenc"],
         default="libx264",
-        help="Encoder de video: libx264 (CPU, padrao) ou nvenc (GPU)",
+        help="Video encoder: libx264 (CPU, default) or nvenc (GPU)",
     )
     args = parser.parse_args()
     if not 0 <= args.crf <= 51:
-        parser.error("--crf deve estar entre 0 e 51")
+        parser.error("--crf must be between 0 and 51")
 
     root = Path(args.path).resolve()
     if not root.is_dir():
-        parser.error(f"Diretorio inexistente: {root}")
+        parser.error(f"Directory does not exist: {root}")
 
     output_root = root / "DirectPlay"
     root_log = root / "directplay_optimizer.log"
     write_log(root_log, "=" * 60)
-    write_log(root_log, f"Inicio do processamento: {root}")
+    write_log(root_log, f"Processing start: {root}")
     if args.analyze:
-        print("Modo analise: nenhum arquivo sera convertido.")
+        print("Analyze mode: no file will be converted.")
     elif args.audit:
-        print("Modo auditoria: nenhum arquivo sera convertido; apenas condicoes de risco serao listadas.")
+        print("Audit mode: no file will be converted; only risk conditions will be listed.")
     elif args.full:
-        print("Modo recodificacao completa ativado.")
+        print("Full re-encode mode enabled.")
     else:
-        print("Modo hibrido ativado: remux, video copy ou recodificacao conforme a analise.")
-    print("Iniciando processamento MP4 Direct Play (Python)...")
-    print(f"Pasta Raiz de Busca: {root}")
+        print("Hybrid mode enabled: remux, video copy or re-encode according to the analysis.")
+    print("Starting MP4 Direct Play processing (Python)...")
+    print(f"Search root folder: {root}")
     if not args.audit:
-        print(f"Pasta Raiz de Destino: {output_root}")
+        print(f"Destination root folder: {output_root}")
     if args.encoder == "nvenc":
-        print("Encoder de video: nvenc (GPU)")
+        print("Video encoder: nvenc (GPU)")
     print()
 
-    failure_log = root / "directplay_falhas.txt"
+    failure_log = root / "directplay_failures.txt"
+    legacy_failure_log = root / "directplay_falhas.txt"
     if args.retry_failed:
-        if not failure_log.exists():
-            parser.error(f"Nenhum arquivo de falhas encontrado: {failure_log}")
+        if failure_log.exists():
+            failure_source = failure_log
+        elif legacy_failure_log.exists():
+            failure_source = legacy_failure_log
+        else:
+            parser.error(f"No failure list found: {failure_log}")
         listed = [
             line.strip()
-            for line in failure_log.read_text(encoding="utf-8", errors="replace").splitlines()
+            for line in failure_source.read_text(encoding="utf-8", errors="replace").splitlines()
             if line.strip()
         ]
         existing = [root / entry for entry in listed if (root / entry).is_file()]
         if len(existing) != len(listed):
-            print(f"{len(listed) - len(existing)} arquivo(s) da lista nao existem mais e serao ignorados.")
+            print(f"{len(listed) - len(existing)} file(s) from the list no longer exist and will be ignored.")
         sources = existing
-        print(f"Reprocessando {len(sources)} arquivo(s) da lista de falhas.")
+        print(f"Reprocessing {len(sources)} file(s) from the failure list.")
     else:
         sources = [
             source
@@ -1027,7 +1044,7 @@ def main() -> int:
         ]
 
     if args.audit:
-        return audit_library(sources, root, root / "directplay_auditoria.txt", root_log)
+        return audit_library(sources, root, root / "directplay_audit.txt", root_log)
 
     analysis_results: list[tuple[Path, str]] = []
     decision_counts: dict[str, int] = {}
@@ -1054,11 +1071,11 @@ def main() -> int:
         if len(analysis_results) == 1:
             relative_source, mode = analysis_results[0]
             source = root / relative_source
-            print("\nAnalise do arquivo:")
-            print(f"  arquivo: {source}")
-            print(f"  decisao: {mode}")
+            print("\nFile analysis:")
+            print(f"  file: {source}")
+            print(f"  decision: {mode}")
         elif len(analysis_results) > 1:
-            print("\nResumo da analise por diretorio:")
+            print("\nAnalysis summary by directory:")
             grouped: dict[Path, dict[str, int]] = {}
             for relative_source, mode in analysis_results:
                 directory = relative_source.parent
@@ -1068,24 +1085,24 @@ def main() -> int:
                 label = "." if str(directory) == "." else str(directory)
                 print(f"\n[{label}]")
                 total = sum(grouped[directory].values())
-                print(f"  arquivos: {total}")
+                print(f"  files: {total}")
                 for mode, count in sorted(grouped[directory].items()):
                     print(f"  {mode}: {count}")
         else:
-            print("\nNenhum video encontrado para analisar.")
+            print("\nNo video found to analyze.")
     if decision_counts:
-        write_log(root_log, "Resumo das decisoes:")
+        write_log(root_log, "Decision summary:")
         for mode, count in sorted(decision_counts.items()):
             write_log(root_log, f"  {mode}: {count}")
 
     labels = {
-        "sucesso": "convertidos",
-        "pulado": "pulados (saida ja existia)",
-        "analisado": "analisados",
-        "rejeitada": "rejeitados na validacao",
-        "falha": "falhas",
+        "success": "converted",
+        "skipped": "skipped (output already existed)",
+        "analyzed": "analyzed",
+        "rejected": "rejected in validation",
+        "failed": "failed",
     }
-    print(f"\nResumo ({len(sources)} arquivo(s)):")
+    print(f"\nSummary ({len(sources)} file(s)):")
     for outcome in labels:
         count = outcome_counts.get(outcome, 0)
         if count:
@@ -1093,24 +1110,25 @@ def main() -> int:
     for outcome, count in sorted(outcome_counts.items()):
         if outcome not in labels:
             print(f"  {outcome}: {count}")
-    write_log(root_log, "Resumo dos resultados:")
+    write_log(root_log, "Outcome summary:")
     for outcome, count in sorted(outcome_counts.items()):
         write_log(root_log, f"  {outcome}: {count}")
 
     if failures:
-        print(f"\nFalhas ({len(failures)}):")
+        print(f"\nFailures ({len(failures)}):")
         for relative_source in failures[:20]:
             print(f"  - {relative_source}")
         if len(failures) > 20:
-            print(f"  ... e mais {len(failures) - 20} arquivo(s)")
+            print(f"  ... and {len(failures) - 20} more file(s)")
         failure_log.write_text("\n".join(str(path) for path in failures) + "\n", encoding="utf-8")
-        print(f"Lista salva em: {failure_log}")
-        print("Para tentar novamente: --retry-failed")
-        write_log(root_log, f"Falhas gravadas em {failure_log}")
-    elif failure_log.exists() and not args.analyze:
-        failure_log.unlink()
+        print(f"List saved to: {failure_log}")
+        print("To retry: --retry-failed")
+        write_log(root_log, f"Failures written to {failure_log}")
+    elif not args.analyze:
+        failure_log.unlink(missing_ok=True)
+        legacy_failure_log.unlink(missing_ok=True)
 
-    write_log(root_log, "Processamento concluido")
+    write_log(root_log, "Processing finished")
     return 0
 
 

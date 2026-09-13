@@ -116,8 +116,8 @@ Assuming the root is `/media/movies`:
 │       ├── movie.log
 │       └── movie.progress
 ├── directplay_optimizer.log       ← overall run log
-├── directplay_falhas.txt          ← failures of the last run (only when there are any)
-└── directplay_auditoria.txt       ← risk conditions found by the last --audit run
+├── directplay_failures.txt        ← failures of the last run (only when there are any)
+└── directplay_audit.txt           ← risk conditions found by the last --audit run
 ```
 
 - Source files are **never modified**.
@@ -237,7 +237,7 @@ A **read-only scan**: it runs `ffprobe` on every source and reports what stands 
 python jellyfin_direct_play_optimizer.py /media/movies --audit
 ```
 
-The console shows, and `directplay_auditoria.txt` records, in this order:
+The console shows, and `directplay_audit.txt` records, in this order:
 
 - **What the script would do** with each file: `nothing (already compatible)`, `copy video + convert audio`, or `full re-encode` — so you know how much work a real run would do;
 - **Risk conditions** found in the sources, with the number of affected files and up to 10 example paths each;
@@ -270,13 +270,15 @@ Most of these conditions are handled automatically by the conversion modes; the 
 
 When a run ends, the script prints a summary with the outcome of every file — converted, skipped (output already existed), analyzed, rejected in validation, and failed — and writes the same counts to the overall log.
 
-If anything failed, up to 20 relative paths are printed and all of them are saved to `directplay_falhas.txt` at the root of the input folder, so they can be retried with:
+If anything failed, up to 20 relative paths are printed and all of them are saved to `directplay_failures.txt` at the root of the input folder, so they can be retried with:
 
 ```bash
 python jellyfin_direct_play_optimizer.py /media/movies --retry-failed
 ```
 
 The file is rewritten on every run that has failures and removed when a run finishes with none, so `--retry-failed` always points at the most recent failures. `--analyze` never removes it (handy to inspect the problem files first).
+
+For backward compatibility, a list written by an older version as `directplay_falhas.txt` is still read when `directplay_failures.txt` does not exist.
 
 ### Examples
 
@@ -310,8 +312,6 @@ python jellyfin_direct_play_optimizer.py /media/shows --full --crf 23
 python jellyfin_direct_play_optimizer.py /media/shows --full --encoder nvenc
 ```
 
-- **Anamorphic video (SAR other than 1:1) is copied as is**: it is treated as Direct-Play compatible, but clients that ignore the sample aspect ratio may show wrong proportions. `--audit` flags these files so you can decide case by case.
-- **HE-AAC audio is copied instead of re-encoded**: an AAC track with ≤ 2 channels and 48 kHz is copied even when its profile is `HE-AAC`, which the web client rejects (`NotEquals AudioProfile HE-AAC`). `--audit` reports it as `audio_profile`.
 **Force full re-encode explicitly on the CPU:**
 
 ```bash
@@ -323,6 +323,60 @@ python jellyfin_direct_play_optimizer.py /media/shows --full --encoder libx264
 ```bash
 python jellyfin_direct_play_optimizer.py /media/shows --overwrite
 ```
+
+---
+
+## 🔎 Verifying Direct Play
+
+The repository ships a second script, `verify_direct_play.py`, that asks the server what it is **actually doing** for each active session, so you can confirm that a converted file really plays as Direct Play. It is **read-only**: it only calls `GET /Sessions` and never touches your files or the library.
+
+**Why it matters:** `validate_output` checks the file against the target profile, but the final decision belongs to the profile the **client** declares. A file that passes validation can still be remuxed (Direct Stream) or transcoded — and with transcoding enabled the server will not fail loudly, it will silently re-encode on the CPU. Only the live session shows the truth.
+
+### Requirements
+
+- An API key created in **Jellyfin Dashboard → API Keys**;
+- the key exported as `JELLYFIN_API_KEY` (never hardcode it, never commit it);
+- optional: `JELLYFIN_URL` to avoid repeating `--url`.
+
+### Usage
+
+Start playback on the client **first**, then run:
+
+```powershell
+$env:JELLYFIN_API_KEY = "..."
+python verify_direct_play.py --url http://192.168.1.239:8096 --once
+```
+
+| Option | Description |
+| --- | --- |
+| `--url URL` | Server base URL (default: `JELLYFIN_URL` env var or `http://localhost:8096`). |
+| `--once` | Read once and exit. |
+| `--interval N` | Delay between reads in continuous mode (default: `5`). |
+| `--json` | Print the raw session JSON (debugging). |
+
+Without `--once` it keeps watching, printing a report only when something changes, plus a line when a session ends.
+
+### Reading the output
+
+```
+DIRECT PLAY
+    client  : Jellyfin Web (Chrome)  user: demo
+    item    : Movie (2024)
+    file    : /media/movies/DirectPlay/Movie (2024)/movie.mp4
+    source  : container=mp4 video=videofile
+    server  : SupportsDirectPlay=True SupportsDirectStream=True
+    position: 00:12:41
+```
+
+- `DIRECT PLAY` — the goal: the client plays the file as is;
+- `DIRECT STREAM (server-side remux)` — the server is repackaging the file (usually because of the audio track); no re-encoding, but not Direct Play;
+- `TRANSCODE` — the server is re-encoding. The `REASONS:` list shows why, in plain language, for example `AudioProfileNotSupported (unsupported audio profile (e.g. HE-AAC))`.
+
+### When to use it
+
+1. **After converting a folder** — play one converted file and confirm it reports `DIRECT PLAY`;
+2. **When playback works but the server is under load** — check whether the file is being remuxed or transcoded behind the scenes;
+3. **When a file refuses to play** — the `REASONS:` list points at the dimension to fix. This closes the loop with `--audit`: the audit is offline and preventive, this script is online and confirmatory.
 
 ---
 
@@ -340,6 +394,7 @@ python jellyfin_direct_play_optimizer.py /media/shows --overwrite
 - **External** subtitles in the source folder are only copied if their name indicates:
   - PT/EN language (`pt`, `pt-BR`, `por`, `portuguese`, `en`, `eng`, `english`, …); or
   - Being *forced*.
+- The name must also be the **video name followed by a separator** (`.`, `-`, `_` or space): `Movie 2024 1080p.pt.srt` is copied for `Movie.mkv`, while `Movie2.pt.srt` (a different video) is ignored.
 - No subtitle is embedded into the MP4: the goal is Direct Play + external subtitle.
 
 ---
@@ -349,6 +404,8 @@ python jellyfin_direct_play_optimizer.py /media/shows --overwrite
 - The target profile is **conservative** (H.264 High @ 4.1, 1080p, 30 fps, AAC stereo). This maximizes compatibility but may reduce quality for very high-quality sources.
 - **Audio is always downmixed to AAC stereo** (≤ 2 channels). Multi-channel sources lose their surround layout on purpose: with transcoding disabled, a 5.1 track would not play on clients that cap audio at 2 channels. 5.1 output is not an option today.
 - **Image-based subtitles (PGS/VobSub) are not usable**: burning them in would require transcoding. Only text subtitles are extracted, as external `.srt`.
+- **Anamorphic video (SAR other than 1:1) is copied as is**: it is treated as Direct-Play compatible, but clients that ignore the sample aspect ratio may show wrong proportions. `--audit` flags these files so you can decide case by case.
+- **HE-AAC audio is copied instead of re-encoded**: an AAC track with ≤ 2 channels and 48 kHz is copied even when its profile is `HE-AAC`, which the web client rejects (`NotEquals AudioProfile HE-AAC`). `--audit` reports it as `audio_profile`.
 - **Doesn't handle HDR10+ / dynamic Dolby Vision perfectly**: applies static Mobius tonemapping to SDR.
 - **Doesn't handle multiple angles, interactive tracks, or complex chapters**.
 - "Animation" detection is based on the **filename** (simple heuristic).

@@ -12,30 +12,30 @@ from datetime import datetime
 
 PLAY_METHOD_LABEL = {
     "DirectPlay": "DIRECT PLAY",
-    "DirectStream": "DIRECT STREAM (remux feito pelo servidor)",
-    "Transcode": "TRANSCODE  <-- nao toca no seu servidor (transcode desabilitado)",
+    "DirectStream": "DIRECT STREAM (server-side remux)",
+    "Transcode": "TRANSCODE  <-- will not play when transcoding is disabled",
 }
 
-# TranscodeReasons mais relevantes para o alvo do otimizador.
+# TranscodeReasons most relevant to the optimizer target.
 REASON_HINTS = {
-    "ContainerNotSupported": "container incompativel (o remux resolveria)",
-    "VideoCodecNotSupported": "codec de video incompativel",
-    "VideoProfileNotSupported": "profile de video fora do aceito pelo cliente",
-    "VideoLevelNotSupported": "level de video acima do aceito pelo cliente",
-    "VideoBitrateNotSupported": "bitrate de video acima do limite do cliente",
-    "VideoFramerateNotSupported": "framerate acima do limite do cliente",
-    "VideoResolutionNotSupported": "resolucao acima do limite do cliente",
-    "VideoRangeTypeNotSupported": "HDR/Dolby Vision sem suporte no cliente",
-    "AnamorphicVideoNotSupported": "video anamorfico sem suporte no cliente",
-    "RefFramesNotSupported": "ref frames acima do limite do cliente",
-    "InterlacedVideoNotSupported": "video entrelacado",
-    "AudioCodecNotSupported": "codec de audio incompativel",
-    "AudioProfileNotSupported": "profile de audio (ex.: HE-AAC) nao suportado",
-    "AudioChannelsNotSupported": "canais de audio acima do limite do cliente",
-    "AudioBitrateNotSupported": "bitrate de audio acima do limite do cliente",
-    "AudioIsExternal": "faixa de audio externa",
-    "SecondaryAudioNotSupported": "faixa de audio secundaria nao suportada",
-    "SubtitleCodecNotSupported": "formato de legenda nao suportado",
+    "ContainerNotSupported": "unsupported container (a remux would solve it)",
+    "VideoCodecNotSupported": "unsupported video codec",
+    "VideoProfileNotSupported": "video profile outside what the client accepts",
+    "VideoLevelNotSupported": "video level above what the client accepts",
+    "VideoBitrateNotSupported": "video bitrate above the client limit",
+    "VideoFramerateNotSupported": "frame rate above the client limit",
+    "VideoResolutionNotSupported": "resolution above the client limit",
+    "VideoRangeTypeNotSupported": "HDR/Dolby Vision not supported by the client",
+    "AnamorphicVideoNotSupported": "anamorphic video not supported by the client",
+    "RefFramesNotSupported": "reference frames above the client limit",
+    "InterlacedVideoNotSupported": "interlaced video",
+    "AudioCodecNotSupported": "unsupported audio codec",
+    "AudioProfileNotSupported": "unsupported audio profile (e.g. HE-AAC)",
+    "AudioChannelsNotSupported": "audio channels above the client limit",
+    "AudioBitrateNotSupported": "audio bitrate above the client limit",
+    "AudioIsExternal": "external audio track",
+    "SecondaryAudioNotSupported": "secondary audio track not supported",
+    "SubtitleCodecNotSupported": "unsupported subtitle format",
 }
 
 
@@ -53,16 +53,16 @@ def http_get(url: str, api_key: str | None = None, timeout: int = 15) -> object:
     except urllib.error.HTTPError as error:
         if error.code in {401, 403}:
             raise ApiError(
-                "Chave recusada pelo servidor (401/403). Confira se JELLYFIN_API_KEY "
-                "foi definida com uma chave valida e ativa."
+                "Key rejected by the server (401/403). Check that JELLYFIN_API_KEY "
+                "is set to a valid, active key."
             ) from error
-        raise ApiError(f"HTTP {error.code} em {url}") from error
+        raise ApiError(f"HTTP {error.code} on {url}") from error
     except urllib.error.URLError as error:
-        raise ApiError(f"Falha de conexao com {url}: {error}") from error
+        raise ApiError(f"Connection failure to {url}: {error}") from error
     try:
         return json.loads(payload)
     except json.JSONDecodeError as error:
-        raise ApiError(f"Resposta nao era JSON em {url}") from error
+        raise ApiError(f"Response was not JSON on {url}") from error
 
 
 def fetch_public_info(base_url: str) -> dict:
@@ -76,7 +76,7 @@ def fetch_sessions(base_url: str, api_key: str) -> list[dict]:
 
 def format_position(ticks: object) -> str:
     try:
-        total = int(ticks) // 10_000_000  # noqa: ERA001 - ticks sao 100ns
+        total = int(ticks) // 10_000_000  # noqa: ERA001 - ticks are 100ns
     except (TypeError, ValueError):
         return "--:--:--"
     hours, remainder = divmod(max(0, total), 3600)
@@ -104,33 +104,33 @@ def describe_session(session: dict) -> str | None:
 
     lines = [
         f"{label}",
-        f"    cliente : {client} ({device})  usuario: {user}",
+        f"    client  : {client} ({device})  user: {user}",
         f"    item    : {title}",
     ]
     if path:
-        lines.append(f"    arquivo : {path}")
+        lines.append(f"    file    : {path}")
     if container or video:
-        lines.append(f"    origem  : container={container or '?'} video={video or '?'}")
+        lines.append(f"    source  : container={container or '?'} video={video or '?'}")
     if "SupportsDirectPlay" in source:
         lines.append(
-            f"    servidor: SupportsDirectPlay={source.get('SupportsDirectPlay')} "
+            f"    server  : SupportsDirectPlay={source.get('SupportsDirectPlay')} "
             f"SupportsDirectStream={source.get('SupportsDirectStream')}"
         )
     position = format_position(session.get("PlayState", {}).get("PositionTicks"))
-    lines.append(f"    posicao : {position}")
+    lines.append(f"    position: {position}")
 
     transcoding = session.get("TranscodingInfo")
     if isinstance(transcoding, dict):
         reasons = transcoding.get("TranscodeReasons") or []
         if reasons:
-            lines.append("    MOTIVOS:")
+            lines.append("    REASONS:")
             for reason in reasons:
                 hint = REASON_HINTS.get(str(reason), "")
                 lines.append(f"      - {reason}" + (f"  ({hint})" if hint else ""))
         lines.append(
             "    transcode: "
-            f"video={'direto' if transcoding.get('IsVideoDirect') else 'reencodado'} "
-            f"audio={'direto' if transcoding.get('IsAudioDirect') else 'reencodado'} "
+            f"video={'direct' if transcoding.get('IsVideoDirect') else 're-encoded'} "
+            f"audio={'direct' if transcoding.get('IsAudioDirect') else 're-encoded'} "
             f"v={transcoding.get('VideoCodec')} a={transcoding.get('AudioCodec')}"
         )
     return "\n".join(lines)
@@ -147,7 +147,7 @@ def print_report(sessions: list[dict], raw: bool) -> None:
 
     playing = [session for session in sessions if isinstance(session.get("NowPlayingItem"), dict)]
     if not playing:
-        print("Nenhuma sessao reproduzindo agora. Inicie o playback em um cliente e rode de novo.")
+        print("No session is playing right now. Start playback on a client and run again.")
         return
 
     for session in playing:
@@ -159,12 +159,12 @@ def print_report(sessions: list[dict], raw: bool) -> None:
 
 def watch(base_url: str, api_key: str, interval: float) -> int:
     last_state: dict[str, str] = {}
-    print("Monitorando sessoes. Inicie o playback nos clientes. (Ctrl+C para sair)\n")
+    print("Watching sessions. Start playback on the clients. (Ctrl+C to exit)\n")
     while True:
         try:
             sessions = fetch_sessions(base_url, api_key)
         except ApiError as error:
-            print(f"erro: {error}", file=sys.stderr)
+            print(f"error: {error}", file=sys.stderr)
             time.sleep(max(5.0, interval))
             continue
 
@@ -184,28 +184,28 @@ def watch(base_url: str, api_key: str, interval: float) -> int:
             if key not in current_keys:
                 del last_state[key]
                 stamp = datetime.now().strftime("%H:%M:%S")
-                print(f"[{stamp}] sessao encerrada (clientes ativos: {len(current_keys)})\n" + "-" * 60)
+                print(f"[{stamp}] session ended (active clients: {len(current_keys)})\n" + "-" * 60)
 
         time.sleep(max(1.0, interval))
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Mostra, por sessao ativa no Jellyfin, se a reproducao e Direct Play, Direct Stream ou Transcode."
+        description="Shows, for each active Jellyfin session, whether playback is Direct Play, Direct Stream or Transcode."
     )
     parser.add_argument(
         "--url",
         default=os.environ.get("JELLYFIN_URL", "http://localhost:8096"),
-        help="URL base do servidor Jellyfin (padrao: variavel JELLYFIN_URL ou http://localhost:8096)",
+        help="Jellyfin server base URL (default: JELLYFIN_URL env var or http://localhost:8096)",
     )
-    parser.add_argument("--once", action="store_true", help="Faz uma unica leitura e sai")
-    parser.add_argument("--interval", type=float, default=5.0, help="Intervalo entre leituras no modo continuo")
-    parser.add_argument("--json", action="store_true", help="Imprime o JSON bruto das sessoes (depuracao)")
+    parser.add_argument("--once", action="store_true", help="Read once and exit")
+    parser.add_argument("--interval", type=float, default=5.0, help="Delay between reads in continuous mode")
+    parser.add_argument("--json", action="store_true", help="Print the raw session JSON (debugging)")
     args = parser.parse_args()
 
     api_key = os.environ.get("JELLYFIN_API_KEY", "").strip()
     if not api_key:
-        print("A variavel de ambiente JELLYFIN_API_KEY nao esta definida.", file=sys.stderr)
+        print("The JELLYFIN_API_KEY environment variable is not set.", file=sys.stderr)
         print('PowerShell: $env:JELLYFIN_API_KEY = (Read-Host "API key" -AsSecureString | ConvertFrom-SecureString -AsPlainText)', file=sys.stderr)
         return 2
 
@@ -213,17 +213,17 @@ def main() -> int:
     try:
         info = fetch_public_info(base_url)
     except ApiError as error:
-        print(f"erro: {error}", file=sys.stderr)
+        print(f"error: {error}", file=sys.stderr)
         return 1
 
-    print(f"Servidor: {info.get('ServerName', '?')} | Jellyfin {info.get('Version', '?')}")
-    print(f"URL     : {base_url}\n")
+    print(f"Server: {info.get('ServerName', '?')} | Jellyfin {info.get('Version', '?')}")
+    print(f"URL   : {base_url}\n")
 
     if args.once:
         try:
             sessions = fetch_sessions(base_url, api_key)
         except ApiError as error:
-            print(f"erro: {error}", file=sys.stderr)
+            print(f"error: {error}", file=sys.stderr)
             return 1
         print_report(sessions, args.json)
         return 0
@@ -231,7 +231,7 @@ def main() -> int:
     try:
         return watch(base_url, api_key, args.interval)
     except KeyboardInterrupt:
-        print("\nEncerrado.")
+        print("\nStopped.")
         return 0
 
 
