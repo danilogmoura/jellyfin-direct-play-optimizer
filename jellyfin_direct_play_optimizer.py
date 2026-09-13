@@ -227,6 +227,16 @@ def validate_output(output: Path) -> tuple[bool, list[str]]:
         return False, ["ffprobe could not read the output"]
 
     problems: list[str] = []
+    structure_check = subprocess.run(
+        ["ffprobe", "-v", "warning", "-show_entries", "format=format_name", "-of", "json", str(output)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if "chapter track not found" in structure_check.stderr.lower():
+        problems.append("dangling chapter track reference")
+
     format_name = str(probe.get("format", {}).get("format_name", "")).lower()
     if "mp4" not in format_name:
         problems.append(f"invalid container: {format_name or 'unknown'}")
@@ -725,9 +735,13 @@ def process_file(
         *codec_args,
         *metadata_args,
         "-sn",
+        "-map_chapters",
+        "0",
         "-map_metadata",
-        "-1",
+        "0",
         "-metadata",
+        "title=",
+        "-metadata:s:v:0",
         "title=",
         "-movflags",
         "+faststart",

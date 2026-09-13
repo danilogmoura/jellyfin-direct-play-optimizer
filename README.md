@@ -33,7 +33,7 @@ For every video found recursively under the root folder:
    - **Full re-encode** — when nothing is compatible.
 4. Extracts compatible subtitles (PT/EN/forced) into external `.srt` files.
 5. Copies external subtitles already present in the source folder.
-6. Produces a Direct Play–friendly MP4.
+6. Produces a Direct Play–friendly MP4, **preserving chapters** (with their titles) and clearing the container/stream title tags.
 7. Validates the output before accepting it (container, codecs, resolution, HDR, etc.).
 8. Writes detailed logs.
 
@@ -100,6 +100,19 @@ When neither video nor audio is compatible:
 > **No automatic fallback:** if `--encoder nvenc` is used and the GPU encode fails (missing driver, no NVENC-capable device, `ffmpeg` built without `h264_nvenc`, unsupported NVENC options, etc.), the file is reported as **failed**. The script detects and explains the reason but does **not** silently switch to CPU — re-run with `--encoder libx264` (or simply omit `--encoder`) to use the CPU.
 
 > **GPU only accelerates the encode:** filters (HDR tonemapping, `yadif`, scaling) still run on the CPU, so the speed-up is partial on files that need them.
+
+> **Choosing the CRF (size vs quality):** the same CRF does not mean the same size. Measured on a 1440×1080 23.976 fps Blu-ray source (full episode projected from a 30 s sample, VMAF against a lossless reference):
+>
+> | Encoder | Setting | File per 24 min episode | VMAF mean | VMAF p1 | VMAF worst frame | Time per episode |
+> | --- | --- | --- | --- | --- | --- | --- |
+> | GPU `nvenc` p5/hq | `--crf 22` | ~976 MB | 97.51 | 95.50 | 93.07 | ~2 min |
+> | CPU `libx264` fast | `--crf 20` | ~757 MB | 96.83 | 94.38 | 93.41 | ~13-15 min |
+> | GPU `nvenc` p5/hq | `--crf 24` | ~731 MB | 97.13 | 94.88 | 91.86 | ~2 min |
+> | CPU `libx264` fast | `--crf 22` | ~603 MB | 96.23 | 93.23 | 91.66 | ~11-12 min |
+> | GPU `nvenc` p5/hq | `--crf 26` | ~566 MB | 96.66 | 93.78 | 90.03 | ~2 min |
+> | CPU `libx264` fast | `--crf 24` | ~472 MB | 95.46 | 91.67 | 89.49 | ~11-12 min |
+>
+> Two conclusions. **On the average, a tuned NVENC beats libx264 per byte** — CQ 26 produces a smaller file *and* a higher mean VMAF than CRF 22 (and is 6-7× faster). **Where libx264 wins is the worst frames:** at comparable sizes (~730-760 MB) it scores ~1.5 points higher on the 1st percentile, and its best frame floor (93.41 at CRF 20) is above what NVENC reaches even at 976 MB. Worst frames are the ones where banding and blocking become visible, so this is the one axis where the CPU encoder is worth its time. Raise the NVENC CRF for size parity with the source; switch to `libx264` only if you care about dark scenes and gradients.
 
 ---
 
@@ -194,7 +207,10 @@ Before accepting a file, the script checks both **input** and **output**.
 - No HDR metadata;
 - Not interlaced;
 - Audio is AAC, ≤ 2 channels, 48 kHz;
-- Minimum size of 1 MiB (avoids empty/truncated outputs).
+- Minimum size of 1 MiB (avoids empty/truncated outputs);
+- No dangling chapter track reference (`Referenced QT chapter track not found`).
+
+On the last point: the script keeps the source metadata so that `ffmpeg` writes a **valid QuickTime chapter track**. Stripping every metadata tag (`-map_metadata -1`) makes the muxer skip the chapter track while still writing a `tref/chap` pointer to a track that does not exist — a structurally broken MP4 that some players refuse to seek in. Titles are cleared individually instead (`-metadata title=`, `-metadata:s:v:0 title=`).
 
 If the output fails validation, it is **discarded** and the reason is logged.
 
@@ -412,6 +428,7 @@ DIRECT PLAY
 - "Animation" detection is based on the **filename** (simple heuristic).
 - No parallelism: processes **one file at a time** to avoid saturating the CPU (with `--encoder nvenc`, the encode itself runs on the GPU).
 - GPU encoding (`--encoder nvenc`) has no automatic CPU fallback: if it fails, the file is reported as failed and must be re-run with `--encoder libx264`.
+- **Some clients cannot seek in copied streams — the video has to be re-encoded for them.** Verified on an LG webOS TV with Blu-ray sources (H.264 High @ 4.1, 1440×1080, 23.976 fps, 1 ms-quantized Matroska timestamps): the MKV original seeks fine, `remux` / `copy video + convert audio` outputs play but **stop dead on any seek or resume**, and `full re-encode` works. The file itself is correct — the browser seeks the same file without any problem, Jellyfin reports Direct Play, the keyframes are all IDR, the audio/video timelines match within 10 ms and there are no gaps. Two container-level fixes were tried and **neither** helped: rewriting the video sample table to a uniform CFR grid (`stts` with a single entry, `time_base` 1/24000, decoded frames bit-identical to the source) and removing the edit-list offset. The trigger is inside the copied bitstream, so the only reliable path for such clients is `--full` (with `--crf 26` for size parity). `--audit` tells you in advance which of your files would take the copy path.
 
 ---
 
