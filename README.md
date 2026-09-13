@@ -57,6 +57,8 @@ That is why the target is deliberately conservative, and every rule exists to ma
 
 If every client you use declares 6 channels (native TV/box apps usually do), preserving 5.1 could be revisited — but it was deliberately left out because it trades "plays everywhere" for "plays on surround-capable clients only".
 
+The same reasoning applies to the AAC **profile**: the web client accepts `LC` and rejects `HE-AAC`, so any other AAC profile is re-encoded to LC instead of being copied.
+
 ---
 
 ## 🧠 How it decides the mode
@@ -69,7 +71,7 @@ When both video **and** audio are already in formats Jellyfin accepts:
 
 - Source container is already MP4 (or compatible);
 - Video: H.264, Baseline/Constrained Baseline/Main/High profile, level ≤ 4.1, `yuv420p`, ≤ 1920×1080, no HDR, not interlaced, CFR, ≤ 30 fps;
-- Audio: AAC, ≤ 2 channels, 48 kHz.
+- Audio: AAC **LC** (or the profile reported as absent), ≤ 2 channels, 48 kHz.
 
 → Just repackages. **Fast**, with virtually no quality loss.
 
@@ -78,7 +80,7 @@ When both video **and** audio are already in formats Jellyfin accepts:
 When video is compatible but audio is not:
 
 - Video is copied without re-encoding;
-- Audio is converted to AAC stereo 48 kHz.
+- Audio is converted to AAC stereo 48 kHz — including `HE-AAC` / `HE-AACv2` tracks, which the web client rejects (`NotEquals AudioProfile HE-AAC`).
 
 → Great CPU savings, keeps video quality intact.
 
@@ -261,10 +263,10 @@ The conditions are not mutually exclusive — a single file usually triggers sev
 | audio not AAC | Re-encoded to AAC-LC. |
 | audio with more than 2 channels | Downmixed to stereo (intentional). |
 | audio sample rate other than 48 kHz | Re-encoded to 48 kHz. |
-| HE-AAC audio profile | The web client declares `NotEquals AudioProfile HE-AAC`. **Reported but not fixed yet** (see *Known limitations*). |
+| HE-AAC audio profile | The web client declares `NotEquals AudioProfile HE-AAC`, so the track is re-encoded to AAC-LC instead of being copied. |
 | image-based subtitles (PGS/VobSub) | Unusable without transcoding, so they are dropped. |
 
-Most of these conditions are handled automatically by the conversion modes; the two marked as *not fixed* only mean the script keeps the source as is, and Jellyfin may fall back to transcoding for them if the permission is enabled.
+Most of these conditions are handled automatically by the conversion modes. The only one marked as *not fixed* — anamorphic video — means the script keeps the source as is, and Jellyfin may fall back to transcoding for it if the permission is enabled.
 
 ### Run summary and retrying failures
 
@@ -405,7 +407,6 @@ DIRECT PLAY
 - **Audio is always downmixed to AAC stereo** (≤ 2 channels). Multi-channel sources lose their surround layout on purpose: with transcoding disabled, a 5.1 track would not play on clients that cap audio at 2 channels. 5.1 output is not an option today.
 - **Image-based subtitles (PGS/VobSub) are not usable**: burning them in would require transcoding. Only text subtitles are extracted, as external `.srt`.
 - **Anamorphic video (SAR other than 1:1) is copied as is**: it is treated as Direct-Play compatible, but clients that ignore the sample aspect ratio may show wrong proportions. `--audit` flags these files so you can decide case by case.
-- **HE-AAC audio is copied instead of re-encoded**: an AAC track with ≤ 2 channels and 48 kHz is copied even when its profile is `HE-AAC`, which the web client rejects (`NotEquals AudioProfile HE-AAC`). `--audit` reports it as `audio_profile`.
 - **Doesn't handle HDR10+ / dynamic Dolby Vision perfectly**: applies static Mobius tonemapping to SDR.
 - **Doesn't handle multiple angles, interactive tracks, or complex chapters**.
 - "Animation" detection is based on the **filename** (simple heuristic).

@@ -260,6 +260,8 @@ def validate_output(output: Path) -> tuple[bool, list[str]]:
             continue
         if str(stream.get("codec_name", "")).lower() != "aac":
             problems.append(f"invalid audio codec: {stream.get('codec_name', 'unknown')}")
+        if str(stream.get("profile") or "").lower() not in DIRECT_PLAY_AUDIO_PROFILES:
+            problems.append(f"invalid audio profile: {stream.get('profile') or 'unknown'}")
         if int(stream.get("channels", 0)) > 2:
             problems.append("audio with more than two channels")
         if str(stream.get("sample_rate", "")) != "48000":
@@ -276,6 +278,7 @@ def is_remux_compatible(probe: dict[str, Any], video: dict[str, Any], audio_stre
         str(stream.get("codec_name", "")).lower() == "aac"
         and int(stream.get("channels", 0)) <= 2
         and str(stream.get("sample_rate", "")) == "48000"
+        and str(stream.get("profile") or "").lower() in DIRECT_PLAY_AUDIO_PROFILES
         for stream in audio_streams
     )
 
@@ -525,8 +528,9 @@ def build_audio_args(audio_streams: list[dict[str, Any]]) -> tuple[list[str], li
         codec_name = str(stream.get("codec_name", "")).lower()
         channels = int(stream.get("channels", 0) or 0)
         sample_rate = str(stream.get("sample_rate", ""))
+        audio_profile = str(stream.get("profile") or "").lower()
 
-        if codec_name == "aac" and channels <= 2 and sample_rate == "48000":
+        if codec_name == "aac" and channels <= 2 and sample_rate == "48000" and audio_profile in DIRECT_PLAY_AUDIO_PROFILES:
             print(f"  -> Audio {audio_index}: already compatible, copying without re-encoding")
             codecs.extend(
                 [
@@ -537,7 +541,10 @@ def build_audio_args(audio_streams: list[dict[str, Any]]) -> tuple[list[str], li
                 ]
             )
         else:
-            print(f"  -> Audio {audio_index}: converting to AAC stereo 48 kHz")
+            profile_note = ""
+            if codec_name == "aac" and audio_profile not in DIRECT_PLAY_AUDIO_PROFILES:
+                profile_note = f" (profile {stream.get('profile') or 'unknown'} is not accepted by the clients)"
+            print(f"  -> Audio {audio_index}: converting to AAC stereo 48 kHz{profile_note}")
             codecs.extend(
                 [
                     f"-c:a:{audio_index}",
