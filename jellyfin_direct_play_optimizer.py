@@ -34,6 +34,27 @@ LANGUAGE_CODES = {
 
 DIRECT_PLAY_VIDEO_PROFILES = {"baseline", "constrained baseline", "main", "high"}
 RETRYABLE_OUTCOMES = {"falha", "rejeitada"}
+DIRECT_PLAY_AUDIO_PROFILES = {"lc", ""}
+IMAGE_SUBTITLE_CODECS = {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub"}
+AUDIT_CONDITION_LABELS = {
+    "container": "container fora do MP4 (remux resolve)",
+    "video_codec": "video nao-H264",
+    "video_profile": "profile de video fora do aceito",
+    "video_level": "level do video acima de 4.1",
+    "video_pix_fmt": "pixel format diferente de yuv420p",
+    "video_resolucao": "resolucao acima de 1080p",
+    "video_fps": "framerate acima de 30 fps",
+    "video_vfr": "framerate variavel (VFR)",
+    "video_entrelacado": "video entrelacado",
+    "video_hdr": "HDR / Dolby Vision",
+    "video_anamorfico": "video anamorfico (SAR diferente de 1:1)",
+    "audio_codec": "audio nao-AAC",
+    "audio_canais": "audio com mais de 2 canais",
+    "audio_sample_rate": "audio com sample rate diferente de 48 kHz",
+    "audio_profile": "audio HE-AAC (profile diferente de LC)",
+    "legenda_imagem": "legenda de imagem (PGS/VobSub)",
+}
+AUDIT_MAX_EXAMPLES = 10
 
 
 def run_probe(source: Path) -> dict[str, Any] | None:
@@ -778,6 +799,157 @@ def process_file(
     return "sucesso"
 
 
+def is_anamorphic(video: dict[str, Any]) -> bool:
+    sample_aspect_ratio = str(video.get("sample_aspect_ratio", "") or "").strip()
+    return sample_aspect_ratio not in {"", "N/A", "0:1", "1:1"}
+
+
+def audit_conditions(
+    probe: dict[str, Any],
+    video: dict[str, Any],
+    audio_streams: list[dict[str, Any]],
+    subtitle_streams: list[dict[str, Any]],
+) -> list[str]:
+    conditions: list[str] = []
+
+    format_name = str(probe.get("format", {}).get("format_name", "")).lower()
+    if "mp4" not in format_name:
+        conditions.append("container")
+
+    if str(video.get("codec_name", "")).lower() != "h264":
+        conditions.append("video_codec")
+    if str(video.get("profile", "")).lower() not in DIRECT_PLAY_VIDEO_PROFILES:
+        conditions.append("video_profile")
+    if int(video.get("level", 0) or 0) > 41:
+        conditions.append("video_level")
+    if str(video.get("pix_fmt", "")).lower() != "yuv420p":
+        conditions.append("video_pix_fmt")
+    if int(video.get("width", 0)) > 1920 or int(video.get("height", 0)) > 1080:
+        conditions.append("video_resolucao")
+    if parse_frame_rate(video) > 30.001 or parse_frame_rate(video, "avg_frame_rate") > 30.001:
+        conditions.append("video_fps")
+    if is_variable_frame_rate(video):
+        conditions.append("video_vfr")
+    if is_interlaced(video):
+        conditions.append("video_entrelacado")
+    if is_hdr(video):
+        conditions.append("video_hdr")
+    if is_anamorphic(video):
+        conditions.append("video_anamorfico")
+
+    for stream in audio_streams:
+        if str(stream.get("codec_name", "")).lower() != "aac":
+            conditions.append("audio_codec")
+        if int(stream.get("channels", 0) or 0) > 2:
+            conditions.append("audio_canais")
+        if str(stream.get("sample_rate", "")) != "48000":
+            conditions.append("audio_sample_rate")
+        if str(stream.get("profile", "")).lower() not in DIRECT_PLAY_AUDIO_PROFILES:
+            conditions.append("audio_profile")
+
+    if any(str(stream.get("codec_name", "")).lower() in IMAGE_SUBTITLE_CODECS for stream in subtitle_streams):
+        conditions.append("legenda_imagem")
+
+    unique: list[str] = []
+    for condition in conditions:
+        if condition not in unique:
+            unique.append(condition)
+    return unique
+
+
+def audit_decision(probe: dict[str, Any], video: dict[str, Any], audio_streams: list[dict[str, Any]]) -> str:
+    if is_remux_compatible(probe, video, audio_streams):
+        return "nada (ja compativel)"
+    if is_video_copy_compatible(video):
+        return "copiar video + converter audio"
+    return "recodificacao completa"
+
+
+def audit_library(sources: list[Path], root: Path, audit_log: Path, root_log: Path) -> int:
+    decision_counts: dict[str, int] = {}
+    condition_counts: dict[str, int] = {}
+    condition_examples: dict[str, list[Path]] = {}
+    unreadable: list[Path] = []
+
+    print(f"Auditando {len(sources)} arquivo(s). Nada sera convertido.\n")
+    for index, source in enumerate(sources, start=1):
+        probe = run_probe(source)
+        video = first_video_stream(probe) if probe else None
+        if probe is None or video is None:
+            unreadable.append(source.relative_to(root))
+            continue
+
+        streams = probe.get("streams", [])
+        audio = [stream for stream in streams if stream.get("codec_type") == "audio"]
+        subtitles = [stream for stream in streams if stream.get("codec_type") == "subtitle"]
+
+        decision = audit_decision(probe, video, audio)
+        decision_counts[decision] = decision_counts.get(decision, 0) + 1
+
+        relative = source.relative_to(root)
+        for condition in audit_conditions(probe, video, audio, subtitles):
+            condition_counts[condition] = condition_counts.get(condition, 0) + 1
+            condition_examples.setdefault(condition, []).append(relative)
+
+        if index % 100 == 0:
+            print(f"  ... {index} arquivo(s) auditado(s)")
+
+    print(f"\nAuditoria concluida: {len(sources)} arquivo(s).\n")
+
+    print("O que o script faria:")
+    for decision in ("nada (ja compativel)", "copiar video + converter audio", "recodificacao completa"):
+        count = decision_counts.get(decision, 0)
+        if count:
+            print(f"  {decision}: {count}")
+
+    print("\nCondicoes encontradas nas origens:")
+    if not condition_counts:
+        print("  nenhuma")
+    for condition, label in AUDIT_CONDITION_LABELS.items():
+        count = condition_counts.get(condition, 0)
+        if not count:
+            continue
+        print(f"  {label}: {count}")
+        for example in condition_examples.get(condition, [])[:AUDIT_MAX_EXAMPLES]:
+            print(f"      - {example}")
+        remaining = count - AUDIT_MAX_EXAMPLES
+        if remaining > 0:
+            print(f"      ... e mais {remaining} arquivo(s)")
+
+    if unreadable:
+        print(f"\nNao foi possivel analisar ({len(unreadable)}):")
+        for relative in unreadable[:AUDIT_MAX_EXAMPLES]:
+            print(f"  - {relative}")
+        if len(unreadable) > AUDIT_MAX_EXAMPLES:
+            print(f"  ... e mais {len(unreadable) - AUDIT_MAX_EXAMPLES} arquivo(s)")
+
+    lines = [f"Auditoria de Direct Play - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", f"Raiz: {root}", ""]
+    lines.append("== O que o script faria ==")
+    for decision, count in sorted(decision_counts.items()):
+        lines.append(f"{decision}: {count}")
+    lines.append("")
+    lines.append("== Condicoes de risco (nao mutuamente exclusivas) ==")
+    for condition, label in AUDIT_CONDITION_LABELS.items():
+        count = condition_counts.get(condition, 0)
+        if not count:
+            continue
+        lines.append(f"[{condition}] {label}: {count}")
+        for example in condition_examples.get(condition, []):
+            lines.append(f"  - {example}")
+    if unreadable:
+        lines.append("")
+        lines.append("== Nao foi possivel analisar ==")
+        for relative in unreadable:
+            lines.append(f"  - {relative}")
+    audit_log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    print(f"\nRelatorio detalhado: {audit_log}")
+    write_log(root_log, f"Auditoria concluida: {len(sources)} arquivo(s)")
+    for condition, count in sorted(condition_counts.items()):
+        write_log(root_log, f"  {condition}: {count}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Converte videos para MP4 Direct Play do Jellyfin.")
     parser.add_argument("path", nargs="?", default=".", help="Diretorio raiz de entrada")
@@ -785,6 +957,11 @@ def main() -> int:
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--analyze", action="store_true", help="Apenas analisa e mostra a decisao, sem converter")
     mode_group.add_argument("--full", action="store_true", help="Forca recodificacao completa do video")
+    mode_group.add_argument(
+        "--audit",
+        action="store_true",
+        help="Apenas lista as condicoes de risco das origens, sem converter (varredura rapida)",
+    )
     parser.add_argument("--overwrite", action="store_true", help="Reprocessa arquivos que ja possuem saida")
     parser.add_argument(
         "--retry-failed",
@@ -811,13 +988,16 @@ def main() -> int:
     write_log(root_log, f"Inicio do processamento: {root}")
     if args.analyze:
         print("Modo analise: nenhum arquivo sera convertido.")
+    elif args.audit:
+        print("Modo auditoria: nenhum arquivo sera convertido; apenas condicoes de risco serao listadas.")
     elif args.full:
         print("Modo recodificacao completa ativado.")
     else:
         print("Modo hibrido ativado: remux, video copy ou recodificacao conforme a analise.")
     print("Iniciando processamento MP4 Direct Play (Python)...")
     print(f"Pasta Raiz de Busca: {root}")
-    print(f"Pasta Raiz de Destino: {output_root}")
+    if not args.audit:
+        print(f"Pasta Raiz de Destino: {output_root}")
     if args.encoder == "nvenc":
         print("Encoder de video: nvenc (GPU)")
     print()
@@ -845,6 +1025,9 @@ def main() -> int:
             and output_root not in source.parents
             and not source.name.lower().endswith((".tmp.mp4", ".tmp.mkv"))
         ]
+
+    if args.audit:
+        return audit_library(sources, root, root / "directplay_auditoria.txt", root_log)
 
     analysis_results: list[tuple[Path, str]] = []
     decision_counts: dict[str, int] = {}
